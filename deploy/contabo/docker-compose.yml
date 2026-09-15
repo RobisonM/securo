@@ -128,8 +128,10 @@ services:
     environment:
       BACKEND_URL: http://backend:8000
       FRONTEND_URL: ${FRONTEND_URL}
+      NGINX_RESOLVER: "127.0.0.11"
     depends_on:
-      - backend
+      backend:
+        condition: service_started
     networks:
       internal:
       tunnel:
