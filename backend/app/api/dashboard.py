@@ -7,7 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_session
 from app.core.workspace_context import WorkspaceContext, current_workspace
-from app.schemas.dashboard import DashboardSummary, SpendingByCategory, MonthlyTrend, ProjectedTransaction, BalanceHistory
+from app.schemas.dashboard import (
+    DashboardSummary,
+    SpendingByCategory,
+    MonthlyTrend,
+    ProjectedTransaction,
+    BalanceHistory,
+    TopExpense,
+    TopMerchant,
+    CreditCardDashboardItem,
+)
 from app.services import dashboard_service
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -49,6 +58,42 @@ async def get_monthly_trend(
 ):
     return await dashboard_service.get_monthly_trend(
         session, ctx.workspace.id, ctx.user_id, months, account_ids
+    )
+
+
+@router.get("/top-expenses", response_model=list[TopExpense])
+async def get_top_expenses(
+    month: Optional[date] = Query(None),
+    account_ids: Optional[list[uuid.UUID]] = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    session: AsyncSession = Depends(get_async_session),
+):
+    return await dashboard_service.get_top_expenses(
+        session, ctx.workspace.id, ctx.user_id, month, account_ids, limit
+    )
+
+
+@router.get("/top-merchants", response_model=list[TopMerchant])
+async def get_top_merchants(
+    month: Optional[date] = Query(None),
+    account_ids: Optional[list[uuid.UUID]] = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    session: AsyncSession = Depends(get_async_session),
+):
+    return await dashboard_service.get_top_merchants(
+        session, ctx.workspace.id, ctx.user_id, month, account_ids, limit
+    )
+
+
+@router.get("/credit-cards", response_model=list[CreditCardDashboardItem])
+async def get_credit_cards(
+    ctx: WorkspaceContext = Depends(current_workspace),
+    session: AsyncSession = Depends(get_async_session),
+):
+    return await dashboard_service.get_credit_cards_summary(
+        session, ctx.workspace.id, ctx.user_id
     )
 
 

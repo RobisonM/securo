@@ -13,7 +13,17 @@ from app.models.bank_connection import BankConnection
 from app.models.transaction import Transaction
 from app.models.category import Category
 from app.models.recurring_transaction import RecurringTransaction
-from app.schemas.dashboard import DashboardSummary, SpendingByCategory, MonthlyTrend, ProjectedTransaction, DailyBalance, BalanceHistory
+from app.schemas.dashboard import (
+    BalanceHistory,
+    CreditCardDashboardItem,
+    DailyBalance,
+    DashboardSummary,
+    MonthlyTrend,
+    ProjectedTransaction,
+    SpendingByCategory,
+    TopExpense,
+    TopMerchant,
+)
 from app.services._query_filters import (
     counts_as_user_pnl,
     owner_split_offset_by_category,
@@ -24,10 +34,13 @@ from app.services._query_filters import (
 )
 from app.services import invoice_forecast_service
 from app.services.admin_service import get_credit_card_accounting_mode
+from app.services.credit_card_service import compute_available_credit, get_cycle_dates
 from app.services.recurring_transaction_service import get_occurrences_in_range
 from app.services.asset_service import get_asset_values_at
 from app.services.fx_rate_service import _resolve_rate, convert
 from app.models.user import User
+from app.models.credit_card_bill import CreditCardBill
+from app.models.payee import Payee
 
 
 def _month_range(month: date) -> tuple[date, date]:
@@ -423,16 +436,20 @@ async def get_summary(
             .where(Account.workspace_id == workspace_id)
         ) or 0
 
-    # Pending categorization — exclude opening_balance and transfer pairs
+    # Pending categorization — aligned with inbox filters, scoped to the
+    # same reporting month as income/expense so the dashboard period is
+    # consistent. Uncategorized P&L rows still count in monthly_expenses.
     pending_cat_filters = [
         Transaction.workspace_id == workspace_id,
         Transaction.category_id.is_(None),
         Transaction.source != "opening_balance",
-        # Settlement-sourced rows are auto-generated movements (paying
-        # back / receiving back a group debt). They aren't expenses or
-        # income that need a category, so exclude them.
         Transaction.source != "settlement",
         Transaction.transfer_pair_id.is_(None),
+        Transaction.exclude_from_pnl.is_(False),
+        Transaction.is_ignored.is_(False),
+        report_date >= month_start,
+        report_date < month_end,
+        report_date <= today,
         *acct_filter,
     ]
     pending_categorization_result = await session.execute(
@@ -629,6 +646,8 @@ async def get_summary(
         monthly_expenses=abs(real_monthly_expenses),
         monthly_income_primary=round(monthly_income_primary, 2),
         monthly_expenses_primary=round(monthly_expenses_primary, 2),
+        monthly_net=round(real_monthly_income - abs(real_monthly_expenses), 2),
+        monthly_net_primary=round(monthly_income_primary - monthly_expenses_primary, 2),
         projected_income=projected_monthly_income,
         projected_expenses=abs(projected_monthly_expenses),
         projected_income_primary=round(projected_income_primary, 2),
@@ -958,7 +977,6 @@ async def get_monthly_trend(
         )
         .group_by(month_label)
         .order_by(month_label.desc())
-        .limit(months)
     )
 
     user = await session.get(User, user_id)
@@ -1004,16 +1022,22 @@ async def get_monthly_trend(
         else:
             bucket[1] += amount
 
-    trends_raw = sorted(
-        ((month, values[0], values[1]) for month, values in trend_map.items()),
-        key=lambda row: row[0],
-        reverse=True,
-    )[:months]
+    # Zero-fill the last N calendar months ending at the current month so the
+    # frontend always receives a contiguous series.
+    month_keys: list[str] = []
+    cursor = today.replace(day=1)
+    for _ in range(months):
+        month_keys.append(f"{cursor.year:04d}-{cursor.month:02d}")
+        cursor = (
+            cursor.replace(year=cursor.year - 1, month=12)
+            if cursor.month == 1
+            else cursor.replace(month=cursor.month - 1)
+        )
+    month_keys.reverse()  # ascending
 
-    # Subtract owner non-owner-share offsets per month, and add the
-    # viewer's shares of others' splits.
     adjusted: list[MonthlyTrend] = []
-    for month_str, income, expenses in trends_raw:
+    for month_str in month_keys:
+        income, expenses = trend_map.get(month_str, [0.0, 0.0])
         year, mnum = month_str.split("-")
         m_start = date(int(year), int(mnum), 1)
         m_end = (
@@ -1035,15 +1059,202 @@ async def get_monthly_trend(
                 use_effective_date=accounting_mode == "accrual",
                 primary_currency=primary_currency,
             )
+        inc = max(0.0, income - own_inc + shared_inc)
+        exp = max(0.0, expenses - own_exp + shared_exp)
         adjusted.append(
             MonthlyTrend(
                 month=month_str,
-                income=max(0.0, income - own_inc + shared_inc),
-                expenses=max(0.0, expenses - own_exp + shared_exp),
+                income=inc,
+                expenses=exp,
+                net=round(inc - exp, 2),
             )
         )
 
-    return list(reversed(adjusted))
+    return adjusted
+
+
+async def get_top_expenses(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    month: Optional[date] = None,
+    account_ids: Optional[list[uuid.UUID]] = None,
+    limit: int = 10,
+) -> list[TopExpense]:
+    """Largest posted P&L debit movements in the month (excludes transfers/etc.)."""
+    if not month:
+        month = date.today().replace(day=1)
+    month_start, month_end = _month_range(month)
+    today = date.today()
+    acct_filter = [Transaction.account_id.in_(account_ids)] if account_ids is not None else []
+    accounting_mode = await get_credit_card_accounting_mode(session)
+    report_date = reporting_date_col(accounting_mode)
+    primary_amt = _primary_amount_expr()
+
+    result = await session.execute(
+        select(
+            Transaction.id,
+            Transaction.date,
+            Transaction.description,
+            Transaction.payee,
+            Transaction.category_id,
+            Category.name,
+            Transaction.account_id,
+            Account.name,
+            primary_amt,
+            Transaction.currency,
+        )
+        .join(Account, Transaction.account_id == Account.id)
+        .outerjoin(Category, Transaction.category_id == Category.id)
+        .where(
+            Transaction.workspace_id == workspace_id,
+            Account.is_closed == False,
+            Transaction.type == "debit",
+            Transaction.source != "opening_balance",
+            Transaction.status == "posted",
+            report_date >= month_start,
+            report_date < month_end,
+            report_date <= today,
+            counts_as_user_pnl(),
+            *acct_filter,
+        )
+        .order_by(func.abs(primary_amt).desc())
+        .limit(limit)
+    )
+    rows = []
+    for row in result.all():
+        rows.append(
+            TopExpense(
+                id=str(row[0]),
+                date=row[1].isoformat(),
+                description=row[2],
+                payee=row[3],
+                category_id=str(row[4]) if row[4] else None,
+                category_name=row[5],
+                account_id=str(row[6]),
+                account_name=row[7],
+                amount=abs(float(row[8] or 0)),
+                currency=row[9] or "BRL",
+            )
+        )
+    return rows
+
+
+async def get_top_merchants(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    month: Optional[date] = None,
+    account_ids: Optional[list[uuid.UUID]] = None,
+    limit: int = 10,
+) -> list[TopMerchant]:
+    """Top expense merchants for the month.
+
+    V1 aggregates by ``payee_id`` when present, else by trimmed description.
+    merchant_key is not persisted and is not used here (see PERSONAL_DASHBOARD_PLAN).
+    """
+    if not month:
+        month = date.today().replace(day=1)
+    month_start, month_end = _month_range(month)
+    today = date.today()
+    acct_filter = [Transaction.account_id.in_(account_ids)] if account_ids is not None else []
+    accounting_mode = await get_credit_card_accounting_mode(session)
+    report_date = reporting_date_col(accounting_mode)
+    primary_amt = _primary_amount_expr()
+
+    merchant_label = func.coalesce(Payee.name, Transaction.payee, Transaction.description)
+    result = await session.execute(
+        select(
+            merchant_label.label("merchant"),
+            func.sum(func.abs(primary_amt)).label("amount"),
+            func.count().label("txn_count"),
+        )
+        .select_from(Transaction)
+        .join(Account, Transaction.account_id == Account.id)
+        .outerjoin(Payee, Transaction.payee_id == Payee.id)
+        .where(
+            Transaction.workspace_id == workspace_id,
+            Account.is_closed == False,
+            Transaction.type == "debit",
+            Transaction.source != "opening_balance",
+            Transaction.status == "posted",
+            report_date >= month_start,
+            report_date < month_end,
+            report_date <= today,
+            counts_as_user_pnl(),
+            *acct_filter,
+        )
+        .group_by(merchant_label)
+        .order_by(func.sum(func.abs(primary_amt)).desc())
+        .limit(limit)
+    )
+    return [
+        TopMerchant(
+            merchant=row[0] or "Unknown",
+            amount=abs(float(row[1] or 0)),
+            transaction_count=int(row[2] or 0),
+        )
+        for row in result.all()
+    ]
+
+
+async def get_credit_cards_summary(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> list[CreditCardDashboardItem]:
+    """Open credit-card accounts with limit/due fields the model already supports."""
+    result = await session.execute(
+        select(Account).where(
+            Account.workspace_id == workspace_id,
+            Account.type == "credit_card",
+            Account.is_closed == False,
+        ).order_by(Account.name)
+    )
+    accounts = list(result.scalars().all())
+    if not accounts:
+        return []
+
+    account_ids = [a.id for a in accounts]
+    bills_result = await session.execute(
+        select(CreditCardBill)
+        .where(CreditCardBill.account_id.in_(account_ids))
+        .order_by(CreditCardBill.due_date.desc())
+    )
+    latest_bill: dict[uuid.UUID, CreditCardBill] = {}
+    for bill in bills_result.scalars().all():
+        if bill.account_id not in latest_bill:
+            latest_bill[bill.account_id] = bill
+
+    items: list[CreditCardDashboardItem] = []
+    for acc in accounts:
+        cycles = get_cycle_dates(acc.statement_close_day, acc.payment_due_day)
+        available = compute_available_credit(acc.credit_limit, Decimal(str(acc.balance or 0)))
+        bill = latest_bill.get(acc.id)
+        next_close = cycles.get("next_close_date")
+        next_due = cycles.get("next_due_date")
+        items.append(
+            CreditCardDashboardItem(
+                account_id=str(acc.id),
+                name=acc.display_name or acc.name,
+                balance=float(acc.balance or 0),
+                currency=acc.currency,
+                credit_limit=float(acc.credit_limit) if acc.credit_limit is not None else None,
+                available_credit=float(available) if available is not None else None,
+                statement_close_day=acc.statement_close_day,
+                payment_due_day=acc.payment_due_day,
+                next_close_date=next_close.isoformat() if next_close else None,
+                next_due_date=next_due.isoformat() if next_due else None,
+                current_bill_amount=(
+                    float(bill.total_amount) if bill is not None else None
+                ),
+                current_bill_due_date=(
+                    bill.due_date.isoformat() if bill is not None else None
+                ),
+                card_brand=acc.card_brand,
+            )
+        )
+    return items
 
 
 async def get_projected_transactions(

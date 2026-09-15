@@ -285,6 +285,31 @@ export interface Transaction {
   // Keeps the transaction in the ledger/balance while excluding it from P&L.
   exclude_from_pnl?: boolean
   virtual?: boolean
+  /** Derived financial role from the API (Epic 2B). Frontend must not recompute. */
+  classification?:
+    | 'adjustment'
+    | 'card_payment'
+    | 'transfer'
+    | 'uncertain'
+    | 'income'
+    | 'expense'
+  /** Historical suggestion (Epic 3A). Present only with include_suggestions=true. */
+  category_suggestion?: CategorySuggestion | null
+}
+
+export interface CategorySuggestion {
+  category_id: string
+  category_name: string
+  reason: string
+  reason_code:
+    | 'same_payee'
+    | 'same_merchant'
+    | 'same_description_signature'
+    | 'similar_description'
+  matched_count: number
+  total_count: number
+  confidence: number
+  identity_label?: string | null
 }
 
 // Scope for installment-series edits/deletes: "this" (default) only touches
@@ -575,6 +600,15 @@ export interface ImportPreviewTransaction {
   notes?: string | null
 }
 
+export interface ImportPreviewResponse {
+  transactions: ImportPreviewTransaction[]
+  detected_format: string
+  csv_columns?: string[]
+  parse_error?: string | null
+  failed_rows?: FailedRow[]
+  import_mac?: string | null
+}
+
 export interface ImportReviewTransaction extends ImportPreviewTransaction {
   _id: string
   excluded: boolean
@@ -687,6 +721,8 @@ export interface DashboardSummary {
   monthly_expenses: number
   monthly_income_primary: number
   monthly_expenses_primary: number
+  monthly_net?: number
+  monthly_net_primary?: number
   projected_income?: number
   projected_expenses?: number
   projected_income_primary?: number
@@ -717,6 +753,42 @@ export interface MonthlyTrend {
   month: string
   income: number
   expenses: number
+  net?: number
+}
+
+export interface TopExpense {
+  id: string
+  date: string
+  description: string
+  payee?: string | null
+  category_id?: string | null
+  category_name?: string | null
+  account_id: string
+  account_name: string
+  amount: number
+  currency: string
+}
+
+export interface TopMerchant {
+  merchant: string
+  amount: number
+  transaction_count: number
+}
+
+export interface CreditCardDashboardItem {
+  account_id: string
+  name: string
+  balance: number
+  currency: string
+  credit_limit?: number | null
+  available_credit?: number | null
+  statement_close_day?: number | null
+  payment_due_day?: number | null
+  next_close_date?: string | null
+  next_due_date?: string | null
+  current_bill_amount?: number | null
+  current_bill_due_date?: string | null
+  card_brand?: string | null
 }
 
 export interface DailyBalance {

@@ -13,6 +13,9 @@ class DashboardSummary(BaseModel):
     monthly_expenses: float
     monthly_income_primary: float = 0.0
     monthly_expenses_primary: float = 0.0
+    # income − expenses for the selected month (posted P&L only).
+    monthly_net: float = 0.0
+    monthly_net_primary: float = 0.0
     projected_income: float = 0.0
     projected_expenses: float = 0.0
     projected_income_primary: float = 0.0
@@ -47,6 +50,42 @@ class MonthlyTrend(BaseModel):
     month: str  # "2026-01"
     income: float
     expenses: float
+    net: float = 0.0
+
+
+class TopExpense(BaseModel):
+    id: str
+    date: str
+    description: str
+    payee: Optional[str] = None
+    category_id: Optional[str] = None
+    category_name: Optional[str] = None
+    account_id: str
+    account_name: str
+    amount: float
+    currency: str
+
+
+class TopMerchant(BaseModel):
+    merchant: str
+    amount: float
+    transaction_count: int
+
+
+class CreditCardDashboardItem(BaseModel):
+    account_id: str
+    name: str
+    balance: float
+    currency: str
+    credit_limit: Optional[float] = None
+    available_credit: Optional[float] = None
+    statement_close_day: Optional[int] = None
+    payment_due_day: Optional[int] = None
+    next_close_date: Optional[str] = None
+    next_due_date: Optional[str] = None
+    current_bill_amount: Optional[float] = None
+    current_bill_due_date: Optional[str] = None
+    card_brand: Optional[str] = None
 
 
 class DailyBalance(BaseModel):

@@ -18,6 +18,7 @@ from app.models.payee import Payee
 from app.schemas.transaction import (
     InstallmentSeriesCreate,
     TransactionCreate,
+    TransactionRead,
     TransactionUpdate,
     TransferCreate,
 )
@@ -26,6 +27,11 @@ from app.services import reconciliation_service, split_service
 from app.services.credit_card_service import apply_effective_date
 from app.services.rule_service import apply_rules_to_transaction
 from app.services.fx_rate_service import stamp_primary_amount, convert as fx_convert
+from app.services.transaction_classification import (
+    classify_orm,
+    counterpart_account_type_for,
+    group_pair_legs,
+)
 from app.services._query_filters import (
     counts_as_pnl,
     counts_as_user_pnl,
@@ -67,6 +73,71 @@ async def _ensure_payee_in_workspace(
     )
     if result.scalar_one_or_none() is None:
         raise ValueError("Payee not found")
+
+
+async def fetch_counterpart_account_types(
+    session: AsyncSession,
+    transactions: list[Transaction],
+) -> dict[uuid.UUID, Optional[str]]:
+    """Map each transaction id → counterpart account type.
+
+    Issues **at most one** SQL query for the whole page, regardless of how
+    many paired rows are present. Unpaired transactions map to ``None``.
+    """
+    result: dict[uuid.UUID, Optional[str]] = {tx.id: None for tx in transactions}
+    pair_ids = {tx.transfer_pair_id for tx in transactions if tx.transfer_pair_id}
+    if not pair_ids:
+        return result
+
+    rows = await session.execute(
+        select(
+            Transaction.id,
+            Transaction.transfer_pair_id,
+            Transaction.account_id,
+            Account.type,
+        )
+        .join(Account, Transaction.account_id == Account.id)
+        .where(Transaction.transfer_pair_id.in_(pair_ids))
+    )
+    legs = group_pair_legs(
+        (pair_id, account_id, account_type)
+        for _tx_id, pair_id, account_id, account_type in rows.all()
+        if pair_id is not None
+    )
+    for tx in transactions:
+        if tx.transfer_pair_id is None:
+            continue
+        result[tx.id] = counterpart_account_type_for(
+            transfer_pair_id=tx.transfer_pair_id,
+            account_id=tx.account_id,
+            pair_legs=legs,
+        )
+    return result
+
+
+async def build_transaction_reads(
+    session: AsyncSession,
+    transactions: list[Transaction],
+    primary_currency: str,
+) -> list[TransactionRead]:
+    """Serialize ORM transactions to TransactionRead with derived classification.
+
+    Counterpart account types for transfer pairs are loaded in a single
+    batch query — never per row.
+    """
+    counterparts = await fetch_counterpart_account_types(session, transactions)
+    items: list[TransactionRead] = []
+    for tx in transactions:
+        read = TransactionRead.model_validate(tx, from_attributes=True)
+        read.classification = classify_orm(tx, counterparts.get(tx.id))
+        if tx.currency != primary_currency and (
+            read.amount_primary is None
+            or read.fx_rate_used is None
+            or read.fx_rate_used == 1.0
+        ):
+            read.fx_fallback = True
+        items.append(read)
+    return items
 
 
 def _apply_fx_override(transaction, amount, amount_primary=None, fx_rate_used=None):
@@ -256,9 +327,12 @@ async def get_transactions(
     if payee_id:
         base_query = base_query.where(Transaction.payee_id == payee_id)
     if uncategorized:
+        # Pending categorization for the review UI: no category, not a linked
+        # transfer (pair beats uncertain), and not a balance adjustment.
         base_query = base_query.where(
             Transaction.category_id == None,
             Transaction.transfer_pair_id.is_(None),
+            Transaction.exclude_from_pnl.is_(False),
         )
     if exclude_transfers:
         base_query = base_query.where(Transaction.transfer_pair_id.is_(None))
@@ -665,6 +739,7 @@ async def get_transaction(
         )
         .options(
             selectinload(Transaction.category),
+            selectinload(Transaction.account),
             selectinload(Transaction.payee_entity),
             selectinload(Transaction.splits),
         )
@@ -861,7 +936,7 @@ async def create_installment_series(
 
     await session.commit()
     for tx in created:
-        await session.refresh(tx, ["category", "splits"])
+        await session.refresh(tx, ["category", "splits", "account"])
     return created
 
 

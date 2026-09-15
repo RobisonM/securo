@@ -185,7 +185,9 @@ async def list_group_transactions(
     )
     if txs is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
-    return txs
+    from app.services.transaction_service import build_transaction_reads
+
+    return await build_transaction_reads(session, txs, ctx.user.primary_currency)
 
 
 @router.get("/{group_id}/balances", response_model=GroupBalances)

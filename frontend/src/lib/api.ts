@@ -42,7 +42,7 @@ import type {
   RulePreviewResponse,
   ImportLog,
   ImportPreviewTransaction,
-  FailedRow,
+  ImportPreviewResponse,
   PayeeTaxId,
   TaxIdKindOption,
   Workspace,
@@ -64,6 +64,9 @@ import type {
   DashboardSummary,
   SpendingByCategory,
   MonthlyTrend,
+  TopExpense,
+  TopMerchant,
+  CreditCardDashboardItem,
   BalanceHistory,
   PaginatedTransactions,
   ReportResponse,
@@ -508,6 +511,8 @@ export const transactions = {
     max_amount?: number
     sort_by?: string
     sort_dir?: 'asc' | 'desc'
+    /** Epic 3A: attach historical category_suggestion on uncategorized rows. */
+    include_suggestions?: boolean
   }): Promise<PaginatedTransactions> => {
     const { data } = await api.get('/transactions', {
       params,
@@ -646,7 +651,7 @@ export const transactions = {
     inflow_column?: string
     outflow_column?: string
     column_mapping?: Record<string, string>
-  }): Promise<{ transactions: ImportPreviewTransaction[]; detected_format: string; csv_columns?: string[]; parse_error?: string | null; failed_rows?: FailedRow[] }> => {
+  }): Promise<ImportPreviewResponse> => {
     const formData = new FormData()
     formData.append('file', file)
     if (options?.date_format) formData.append('date_format', options.date_format)
@@ -664,7 +669,11 @@ export const transactions = {
     transactions: ImportPreviewTransaction[],
     filename: string,
     detected_format: string,
-    options?: { detect_duplicates?: boolean },
+    options?: {
+      detect_duplicates?: boolean
+      import_mac?: string | null
+      amount_semantics?: 'signed' | 'expenses_positive' | 'expenses_negative'
+    },
   ): Promise<{ imported: number; skipped: number; excluded: number; import_log_id: string }> => {
     const payload: {
       account_id: string
@@ -672,10 +681,18 @@ export const transactions = {
       filename: string
       detected_format: string
       detect_duplicates?: boolean
+      import_mac?: string
+      amount_semantics?: 'signed' | 'expenses_positive' | 'expenses_negative'
     } = { account_id, transactions, filename, detected_format }
 
     if (typeof options?.detect_duplicates === 'boolean') {
       payload.detect_duplicates = options.detect_duplicates
+    }
+    if (options?.import_mac) {
+      payload.import_mac = options.import_mac
+    }
+    if (options?.amount_semantics) {
+      payload.amount_semantics = options.amount_semantics
     }
 
     const { data } = await api.post('/transactions/import', payload)
@@ -1205,6 +1222,26 @@ export const dashboard = {
   monthlyTrend: async (months = 6, accountIds?: string[]): Promise<MonthlyTrend[]> => {
     const extra = acctIdsParam(accountIds)
     const { data } = await api.get('/dashboard/monthly-trend', { params: { months, ...(extra.params ?? {}) }, ...(extra.paramsSerializer ? { paramsSerializer: extra.paramsSerializer } : {}) })
+    return data
+  },
+  topExpenses: async (month?: string, accountIds?: string[], limit = 10): Promise<TopExpense[]> => {
+    const extra = acctIdsParam(accountIds)
+    const { data } = await api.get('/dashboard/top-expenses', {
+      params: { month, limit, ...(extra.params ?? {}) },
+      ...(extra.paramsSerializer ? { paramsSerializer: extra.paramsSerializer } : {}),
+    })
+    return data
+  },
+  topMerchants: async (month?: string, accountIds?: string[], limit = 10): Promise<TopMerchant[]> => {
+    const extra = acctIdsParam(accountIds)
+    const { data } = await api.get('/dashboard/top-merchants', {
+      params: { month, limit, ...(extra.params ?? {}) },
+      ...(extra.paramsSerializer ? { paramsSerializer: extra.paramsSerializer } : {}),
+    })
+    return data
+  },
+  creditCards: async (): Promise<CreditCardDashboardItem[]> => {
+    const { data } = await api.get('/dashboard/credit-cards')
     return data
   },
   projectedTransactions: async (params?: { month?: string; account_id?: string; from?: string; to?: string }): Promise<ProjectedTransaction[]> => {

@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { useDisplayLocale, useDateLocale } from '@/hooks/use-display-locale'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
-import { dashboard, transactions, budgets, categories as categoriesApi, categoryGroups as categoryGroupsApi, accounts as accountsApi, goals as goalsApi, groups as groupsApi, payees as payeesApi, rules as rulesApi } from '@/lib/api'
+import { dashboard, transactions, categories as categoriesApi, categoryGroups as categoryGroupsApi, accounts as accountsApi, goals as goalsApi, groups as groupsApi, payees as payeesApi, rules as rulesApi } from '@/lib/api'
 import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { toast } from 'sonner'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -38,7 +38,7 @@ import {
   Tooltip as RechartsTooltip,
   ResponsiveContainer,
 } from 'recharts'
-import { CheckCircle2, CalendarIcon, Clock, Paperclip, Target, ArrowUpDown, HelpCircle, EyeClosed, AlertCircle } from 'lucide-react'
+import { CalendarIcon, Clock, Paperclip, Target, ArrowUpDown, HelpCircle, EyeClosed } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { ICON_MAP } from '@/lib/category-icons'
 import { PageHeader } from '@/components/page-header'
@@ -48,6 +48,14 @@ import { TransactionDrillDown, type DrillDownFilter } from '@/components/transac
 import { TransactionDialog, type TransactionSavePayload } from '@/components/transaction-dialog'
 import { extractApiError } from '@/lib/api-errors'
 import { TransactionCalendarView } from '@/components/transaction-calendar-view'
+import { FinancialSummaryCards } from '@/components/dashboard/financial-summary-cards'
+import { SpendingByCategoryPanel } from '@/components/dashboard/spending-by-category-panel'
+import { MonthlyTrendChart } from '@/components/dashboard/monthly-trend-chart'
+import { TopExpensesList } from '@/components/dashboard/top-expenses-list'
+import { TopMerchantsList } from '@/components/dashboard/top-merchants-list'
+import { CreditCardsOverview } from '@/components/dashboard/credit-cards-overview'
+import { PendingCategorizationCard } from '@/components/dashboard/pending-categorization-card'
+import { DashboardEmptyState } from '@/components/dashboard/dashboard-empty-state'
 import { TransactionsViewSwitcher, type TransactionsViewMode } from '@/components/transactions-view-switcher'
 import { RuleDialog, type RuleDialogInitialData } from '@/components/rule-dialog'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
@@ -192,10 +200,35 @@ export default function DashboardPage() {
     queryFn: () => dashboard.summary(monthParam, undefined, acctIds, walletIds),
   })
 
-  const { data: spending, isLoading: spendingLoading } = useQuery({
+  const { data: spending, isLoading: spendingLoading, isError: spendingError, refetch: refetchSpending } = useQuery({
     queryKey: ['dashboard', 'spending', selectedMonth, activeAccountIds],
     queryFn: () => dashboard.spendingByCategory(monthParam, acctIds),
     enabled: !noAccounts,
+  })
+
+  const [trendMonths, setTrendMonths] = useState(6)
+
+  const { data: monthlyTrend, isLoading: trendLoading, isError: trendError, refetch: refetchTrend } = useQuery({
+    queryKey: ['dashboard', 'monthly-trend', trendMonths, activeAccountIds],
+    queryFn: () => dashboard.monthlyTrend(trendMonths, acctIds),
+    enabled: !noAccounts,
+  })
+
+  const { data: topExpenses, isLoading: topExpensesLoading, isError: topExpensesError, refetch: refetchTopExpenses } = useQuery({
+    queryKey: ['dashboard', 'top-expenses', selectedMonth, activeAccountIds],
+    queryFn: () => dashboard.topExpenses(monthParam, acctIds, 10),
+    enabled: !noAccounts,
+  })
+
+  const { data: topMerchants, isLoading: topMerchantsLoading, isError: topMerchantsError, refetch: refetchTopMerchants } = useQuery({
+    queryKey: ['dashboard', 'top-merchants', selectedMonth, activeAccountIds],
+    queryFn: () => dashboard.topMerchants(monthParam, acctIds, 10),
+    enabled: !noAccounts,
+  })
+
+  const { data: creditCards, isLoading: creditCardsLoading, isError: creditCardsError, refetch: refetchCreditCards } = useQuery({
+    queryKey: ['dashboard', 'credit-cards'],
+    queryFn: () => dashboard.creditCards(),
   })
 
   const prevMonth = shiftMonth(selectedMonth, -1)
@@ -245,11 +278,6 @@ export default function DashboardPage() {
   const { data: projectedTxs, isLoading: projectedTxLoading } = useQuery({
     queryKey: ['dashboard', 'projected-transactions', selectedMonth],
     queryFn: () => dashboard.projectedTransactions({ month: monthParam }),
-  })
-
-  const { data: budgetComparison } = useQuery({
-    queryKey: ['budgets', 'comparison', selectedMonth],
-    queryFn: () => budgets.comparison(monthParam),
   })
 
   const { data: categoriesList } = useQuery({
@@ -418,14 +446,14 @@ export default function DashboardPage() {
     .filter((a) => (activeAccountIds ? activeAccountIds.includes(a.id) : true) && a.type !== 'credit_card')
     .reduce((sum, a) => sum + Number(a.balance_primary ?? a.current_balance), 0)
 
-  // Savings rate & projection
+  // Savings rate & projection — income/expenses/net come from backend P&L.
   const income = Number(summary?.monthly_income_primary ?? summary?.monthly_income ?? 0)
   const expenses = Number(summary?.monthly_expenses_primary ?? summary?.monthly_expenses ?? 0)
-  // What the month is still expected to close at, once recurring entries that
-  // have not posted yet are counted. Rendered only when it differs from the
-  // realised figure, so a month with nothing pending stays quiet.
-  const projectedIncome = Number(summary?.projected_income_primary ?? summary?.projected_income ?? income)
-  const projectedExpenses = Number(summary?.projected_expenses_primary ?? summary?.projected_expenses ?? expenses)
+  const net = Number(
+    summary?.monthly_net_primary
+      ?? summary?.monthly_net
+      ?? (income - expenses),
+  )
   const savingsRate = income > 0 ? ((income - expenses) / income) * 100 : 0
   const isCurrentMonth = selectedMonth === currentMonth()
   const daysElapsed = isCurrentMonth ? new Date().getDate() : monthLastDay(selectedMonth)
@@ -438,47 +466,19 @@ export default function DashboardPage() {
   const uncategorizedCount = summary?.pending_categorization ?? 0
   const uncategorizedAmount = summary?.pending_categorization_amount ?? 0
 
-  const [catSortDesc, setCatSortDesc] = useState(true)
-
-  // Merged category bars data
-  const mergedCategories = useMemo(() => {
+  // Category bars — include "Sem categoria" so the chart sums to expenses.
+  const spendingItems = useMemo(() => {
     if (!spending) return []
-    const budgetMap = new Map<string, (typeof budgetComparison extends (infer T)[] | undefined ? T : never)>()
-    if (budgetComparison) {
-      for (const b of budgetComparison) {
-        budgetMap.set(b.category_id, b)
-      }
-    }
-    return spending
-      .filter(s => s.category_id !== null)
-      .map(s => {
-        const budget = s.category_id ? budgetMap.get(s.category_id) : undefined
-        // The category widget must show the same spend set as its drill-down:
-        // settled transactions plus pending/future rows and recurring
-        // projections. The API keeps `total` as settled-only for callers that
-        // need the actual/forecast split, while `projected_total` is the
-        // user-visible all-in amount.
-        const actual = s.projected_total
-        const prevAmount = budget ? Number(budget.projected_prev_month_amount) : 0
-        let momPct: number | null = null
-        if (prevAmount > 0) {
-          momPct = ((actual - prevAmount) / prevAmount) * 100
-        } else if (actual > 0) {
-          momPct = 100
-        }
-        return {
-          category_id: s.category_id!,
-          category_name: s.category_name,
-          category_icon: s.category_icon,
-          category_color: s.category_color,
-          actual,
-          budget_amount: budget ? Number(budget.budget_amount) : null,
-          percentage_used: budget?.percentage_used ?? null,
-          momPct,
-        }
-      })
-      .sort((a, b) => catSortDesc ? b.actual - a.actual : a.actual - b.actual)
-  }, [spending, budgetComparison, catSortDesc])
+    return [...spending].sort((a, b) => b.total - a.total)
+  }, [spending])
+
+  const showEmptyDashboard =
+    !summaryLoading
+    && !noAccounts
+    && income === 0
+    && expenses === 0
+    && (spending?.length ?? 0) === 0
+    && (topExpenses?.length ?? 0) === 0
 
   const [txPage, setTxPage] = useState(1)
   const [txSortDesc, setTxSortDesc] = useState(true)
@@ -618,7 +618,50 @@ export default function DashboardPage() {
         section={greeting}
         title={monthLabel(selectedMonth, uiLocale).replace(/^\w/, c => c.toUpperCase())}
         action={
-          <div className="flex items-center gap-1">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Select
+              value={
+                selectedMonth === currentMonth()
+                  ? 'this_month'
+                  : selectedMonth === shiftMonth(currentMonth(), -1)
+                    ? 'last_month'
+                    : 'custom'
+              }
+              onValueChange={(v) => {
+                if (v === 'this_month') {
+                  handleMonthChange(currentMonth())
+                  setTrendMonths(6)
+                } else if (v === 'last_month') {
+                  handleMonthChange(shiftMonth(currentMonth(), -1))
+                  setTrendMonths(6)
+                } else if (v === 'last_3') {
+                  handleMonthChange(currentMonth())
+                  setTrendMonths(3)
+                } else if (v === 'last_6') {
+                  handleMonthChange(currentMonth())
+                  setTrendMonths(6)
+                } else if (v === 'this_year') {
+                  handleMonthChange(currentMonth())
+                  const m = Number(currentMonth().slice(5, 7))
+                  setTrendMonths(Math.min(Math.max(m, 1), 12))
+                }
+              }}
+            >
+              <SelectTrigger className="h-8 w-[160px] text-xs" aria-label={t('dashboard.period')}>
+                <SelectValue placeholder={t('dashboard.period')} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="this_month">{t('dashboard.periodThisMonth')}</SelectItem>
+                <SelectItem value="last_month">{t('dashboard.periodLastMonth')}</SelectItem>
+                <SelectItem value="last_3">{t('dashboard.periodLast3')}</SelectItem>
+                <SelectItem value="last_6">{t('dashboard.periodLast6')}</SelectItem>
+                <SelectItem value="this_year">{t('dashboard.periodThisYear')}</SelectItem>
+                {selectedMonth !== currentMonth() && selectedMonth !== shiftMonth(currentMonth(), -1) && (
+                  <SelectItem value="custom">{monthLabel(selectedMonth, uiLocale)}</SelectItem>
+                )}
+              </SelectContent>
+            </Select>
+            <div className="flex items-center gap-1">
             <button
               className="h-8 w-8 flex items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:border-border hover:text-foreground transition-all text-base"
               onClick={() => handleMonthChange(shiftMonth(selectedMonth, -1))}
@@ -627,7 +670,7 @@ export default function DashboardPage() {
               <PopoverTrigger asChild>
                 <button
                   type="button"
-                  className="inline-flex items-center justify-center gap-2 border border-border rounded-lg px-3 py-1.5 text-sm bg-card text-foreground hover:bg-muted/50 transition-all cursor-pointer min-w-[180px]"
+                  className="inline-flex items-center justify-center gap-2 border border-border rounded-lg px-3 py-1.5 text-sm bg-card text-foreground hover:bg-muted/50 transition-all cursor-pointer min-w-[140px]"
                 >
                   <CalendarIcon className="size-3.5 text-muted-foreground" />
                   {monthLabel(selectedMonth, uiLocale).replace(/^\w/, c => c.toUpperCase())}
@@ -650,6 +693,7 @@ export default function DashboardPage() {
               className="h-8 w-8 flex items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:border-border hover:text-foreground transition-all text-base"
               onClick={() => handleMonthChange(shiftMonth(selectedMonth, 1))}
             >&#8250;</button>
+            </div>
           </div>
         }
       />
@@ -726,66 +770,9 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Secondary indicators */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-5 gap-y-4">
-          {/* Income */}
-          <button
-            type="button"
-            className="min-w-0 text-left cursor-pointer hover:opacity-70 transition-opacity"
-            onClick={() => setDrillDown({
-              title: t('dashboard.drillDownIncome', { month: monthLabelStr }),
-              type: 'credit',
-              from: monthStart,
-              to: monthEnd,
-            })}
-          >
-            <p className="text-xs font-medium text-muted-foreground mb-1 min-h-[16px] flex items-center">{t('dashboard.monthlyIncome')}</p>
-            {summaryLoading ? (
-              <Skeleton className="h-6 w-20" />
-            ) : (
-              <>
-                <p className="text-xl font-bold tabular-nums text-emerald-600">
-                  +{mask(formatCurrency(income, primaryCurrency, locale))}
-                </p>
-                {Math.abs(projectedIncome - income) >= 0.01 && (
-                  <p className="text-xs text-muted-foreground tabular-nums mt-1">
-                    {t('dashboard.projectedIncome')} {mask(formatCurrency(projectedIncome, primaryCurrency, locale))}
-                  </p>
-                )}
-              </>
-            )}
-          </button>
-
-          {/* Expenses */}
-          <button
-            type="button"
-            className="relative min-w-0 text-left cursor-pointer hover:opacity-70 transition-opacity before:content-[''] before:hidden sm:before:block before:absolute before:-left-2.5 before:top-1.5 before:bottom-1.5 before:w-px before:bg-border"
-            onClick={() => setDrillDown({
-              title: t('dashboard.drillDownExpenses', { month: monthLabelStr }),
-              type: 'debit',
-              from: monthStart,
-              to: monthEnd,
-            })}
-          >
-            <p className="text-xs font-medium text-muted-foreground mb-1 min-h-[16px] flex items-center">{t('dashboard.monthlyExpenses')}</p>
-            {summaryLoading ? (
-              <Skeleton className="h-6 w-20" />
-            ) : (
-              <>
-                <p className="text-xl font-bold tabular-nums text-rose-500">
-                  -{mask(formatCurrency(expenses, primaryCurrency, locale))}
-                </p>
-                {Math.abs(projectedExpenses - expenses) >= 0.01 && (
-                  <p className="text-xs text-muted-foreground tabular-nums mt-1">
-                    {t('dashboard.projectedExpenses')} {mask(formatCurrency(projectedExpenses, primaryCurrency, locale))}
-                  </p>
-                )}
-              </>
-            )}
-          </button>
-
-          {/* Net worth */}
-          <div className="relative min-w-0 before:content-[''] before:hidden sm:before:block before:absolute before:-left-2.5 before:top-1.5 before:bottom-1.5 before:w-px before:bg-border">
+        {/* Net worth + savings (secondary context; P&L is below) */}
+        <div className="grid grid-cols-2 gap-x-5 gap-y-4">
+          <div className="min-w-0">
             <p className="text-xs font-medium text-muted-foreground mb-1 min-h-[16px] flex items-center gap-1">
               {t('dashboard.netWorth')}
               <Tooltip>
@@ -826,9 +813,6 @@ export default function DashboardPage() {
                 </TooltipContent>
               </Tooltip>
             </p>
-            {/* Net worth stays neutral so the secondary row does not out-shout
-                the headline above it. It is the larger number here; colouring
-                it too pulled the eye away from available balance. */}
             {summaryLoading || accountsUnavailable ? (
               <Skeleton className="h-6 w-24" />
             ) : (
@@ -838,8 +822,7 @@ export default function DashboardPage() {
             )}
           </div>
 
-          {/* Savings rate */}
-          <div className="relative min-w-0 before:content-[''] before:hidden sm:before:block before:absolute before:-left-2.5 before:top-1.5 before:bottom-1.5 before:w-px before:bg-border">
+          <div className="min-w-0">
             <p className="text-xs font-medium text-muted-foreground mb-1 min-h-[16px] flex items-center">{t('dashboard.savingsRate')}</p>
             {summaryLoading ? (
               <Skeleton className="h-6 w-16" />
@@ -854,7 +837,6 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Spending projection */}
         {projectedSpend !== null && !summaryLoading && (
           <p className="text-xs text-muted-foreground mt-3">
             {t('dashboard.spendingProjection', { amount: mask(formatCurrency(projectedSpend, primaryCurrency, locale)) })}
@@ -862,130 +844,127 @@ export default function DashboardPage() {
         )}
       </div>
 
-      {/* Uncategorized banner */}
-      {!summaryLoading && (
-        uncategorizedCount > 0 ? (
-          <button
-            type="button"
-            className="w-full flex items-center justify-between gap-3 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-lg px-4 py-2.5 mb-5 cursor-pointer hover:bg-amber-100 dark:hover:bg-amber-500/20 transition-colors"
-            onClick={() => setDrillDown({
-              title: t('dashboard.drillDownUncategorized'),
-              uncategorized: true,
-            })}
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              {/* An icon, not the count: the sentence beside it already states
-                  the number, and a fixed 24px circle clipped it from four
-                  digits on. Severity still reads through the tint. */}
-              <AlertCircle
-                size={16}
-                className={`shrink-0 ${uncategorizedCount >= 20 ? 'text-amber-600 dark:text-amber-400' : 'text-amber-500 dark:text-amber-500'}`}
-              />
-              <span className="text-sm text-amber-900 dark:text-amber-200 truncate">
-                {t('dashboard.uncategorizedCta', { count: uncategorizedCount })}
-                {uncategorizedAmount > 0 && (
-                  <span className="text-amber-700/70 dark:text-amber-300/70"> · {mask(formatCurrency(uncategorizedAmount, userCurrency, locale))}</span>
-                )}
-              </span>
-            </div>
-            <span className="shrink-0 text-sm font-semibold text-amber-600 dark:text-amber-400 hover:underline">
-              {t('dashboard.categorizeNow')} &rarr;
-            </span>
-          </button>
-        ) : (
-          <div className="flex items-center gap-2 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 rounded-lg px-4 py-2.5 mb-5">
-            <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-            <span className="text-sm text-emerald-900 dark:text-emerald-200">{t('dashboard.allCategorized')}</span>
-          </div>
-        )
-      )}
+      {/* P&L summary — values from Epic 5A backend (counts_as_user_pnl) */}
+      <div className="order-first md:order-none">
+        <FinancialSummaryCards
+          income={income}
+          expenses={expenses}
+          net={net}
+          currency={primaryCurrency}
+          locale={locale}
+          loading={summaryLoading}
+          mask={mask}
+          onIncomeClick={() => setDrillDown({
+            title: t('dashboard.drillDownIncome', { month: monthLabelStr }),
+            type: 'credit',
+            from: monthStart,
+            to: monthEnd,
+          })}
+          onExpensesClick={() => setDrillDown({
+            title: t('dashboard.drillDownExpenses', { month: monthLabelStr }),
+            type: 'debit',
+            from: monthStart,
+            to: monthEnd,
+          })}
+        />
+      </div>
 
-      {/* Charts: Category Spending Bars + Balance Flow */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5" style={{ gridAutoRows: 'minmax(380px, auto)' }}>
-        {/* Category Spending Bars */}
-        <div className="bg-card rounded-xl border border-border shadow-sm flex flex-col max-h-[420px]">
-          <div className="px-5 py-4 border-b border-border shrink-0 flex items-center justify-between">
-            <p className="text-sm font-semibold text-foreground">{t('dashboard.spendingByCategory')}</p>
-            <button
-              onClick={() => setCatSortDesc(v => !v)}
-              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+      <PendingCategorizationCard
+        count={uncategorizedCount}
+        amount={uncategorizedAmount}
+        currency={userCurrency}
+        locale={locale}
+        loading={summaryLoading}
+        mask={mask}
+      />
+
+      {showEmptyDashboard ? (
+        <DashboardEmptyState />
+      ) : (
+        <>
+      {/* Category + monthly trend */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5">
+        <SpendingByCategoryPanel
+          items={spendingItems}
+          currency={userCurrency}
+          locale={locale}
+          loading={spendingLoading}
+          error={spendingError}
+          mask={mask}
+          onRetry={() => { void refetchSpending() }}
+          onCategoryClick={(item) => {
+            if (!item.category_id) return
+            setDrillDown({
+              title: t('dashboard.drillDownCategory', { category: item.category_name, month: monthLabelStr }),
+              category_id: item.category_id,
+              type: 'debit',
+              from: monthStart,
+              to: monthEnd,
+            })
+          }}
+          onUncategorizedClick={() => navigate('/transactions?uncategorized=1')}
+        />
+        <div className="flex flex-col gap-2">
+          <div className="flex justify-end">
+            <Select
+              value={String(trendMonths)}
+              onValueChange={(v) => setTrendMonths(Number(v))}
             >
-              <ArrowUpDown size={13} />
-              {catSortDesc ? t('dashboard.sortHighest') : t('dashboard.sortLowest')}
-            </button>
+              <SelectTrigger className="w-[140px] h-8 text-xs" aria-label={t('dashboard.trendWindow')}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="3">{t('dashboard.periodLast3')}</SelectItem>
+                <SelectItem value="6">{t('dashboard.periodLast6')}</SelectItem>
+                <SelectItem value="12">{t('dashboard.periodThisYear')}</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
-          <div className="p-3 overflow-y-auto flex-1">
-            {spendingLoading ? (
-              <div className="space-y-3 p-2">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <Skeleton key={i} className="h-12 w-full" />
-                ))}
-              </div>
-            ) : mergedCategories.length > 0 ? (
-              <div className="space-y-1.5">
-                {mergedCategories.map((item) => {
-                  const hasBudget = item.budget_amount != null && item.budget_amount > 0
-                  const pct = item.percentage_used
-                  const barColor = hasBudget
-                    ? pct! > 100 ? 'bg-rose-500' : pct! >= 80 ? 'bg-amber-400' : 'bg-emerald-500'
-                    : 'bg-muted-foreground/20'
-
-                  return (
-                    <div
-                      key={item.category_id}
-                      className="rounded-lg px-3 py-2.5 hover:bg-muted/50 transition-colors cursor-pointer"
-                      onClick={() => setDrillDown({
-                        title: t('dashboard.drillDownCategory', { category: item.category_name, month: monthLabelStr }),
-                        category_id: item.category_id,
-                        type: 'debit',
-                        from: monthStart,
-                        to: monthEnd,
-                      })}
-                    >
-                      <div className="flex items-center gap-3">
-                        <CategoryIcon icon={item.category_icon} color={item.category_color} size="lg" />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between gap-2 mb-1">
-                            <span className="text-sm font-semibold text-foreground truncate">{item.category_name}</span>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span className="text-sm font-bold tabular-nums text-foreground">{mask(formatCurrency(item.actual, userCurrency, locale))}</span>
-                              {item.momPct !== null && (
-                                <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold tabular-nums ${
-                                  item.momPct > 0 ? 'bg-rose-100 text-rose-600 dark:bg-rose-500/20 dark:text-rose-400' : item.momPct < 0 ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400' : 'bg-muted text-muted-foreground'
-                                }`}>
-                                  {item.momPct > 0 ? '\u2191' : item.momPct < 0 ? '\u2193' : '='}{Math.abs(item.momPct).toFixed(0)}%
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          {hasBudget && (
-                            <div className="flex items-center gap-2">
-                              <div className="flex-1 h-1.5 bg-muted/60 rounded-full overflow-hidden">
-                                <div
-                                  className={`h-full rounded-full transition-all ${barColor}`}
-                                  style={{ width: `${Math.min(pct!, 100)}%` }}
-                                />
-                              </div>
-                              <span className={`text-[11px] tabular-nums font-medium shrink-0 ${
-                                pct! > 100 ? 'text-rose-500' : pct! >= 80 ? 'text-amber-500' : 'text-muted-foreground'
-                              }`}>
-                                {mask(t('dashboard.ofBudget', { budget: formatCurrency(item.budget_amount!, userCurrency, locale) }))}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            ) : (
-              <p className="text-muted-foreground text-sm text-center py-12">{t('dashboard.noData')}</p>
-            )}
-          </div>
+          <MonthlyTrendChart
+            data={monthlyTrend ?? []}
+            currency={primaryCurrency}
+            locale={locale}
+            loading={trendLoading}
+            error={trendError}
+            mask={mask}
+            onRetry={() => { void refetchTrend() }}
+          />
         </div>
+      </div>
 
-        {/* Cumulative Spending Comparison */}
+      {/* Top expenses + merchants */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5">
+        <TopExpensesList
+          items={topExpenses ?? []}
+          currency={userCurrency}
+          locale={locale}
+          loading={topExpensesLoading}
+          error={topExpensesError}
+          mask={mask}
+          onRetry={() => { void refetchTopExpenses() }}
+        />
+        <TopMerchantsList
+          items={topMerchants ?? []}
+          currency={userCurrency}
+          locale={locale}
+          loading={topMerchantsLoading}
+          error={topMerchantsError}
+          mask={mask}
+          onRetry={() => { void refetchTopMerchants() }}
+        />
+      </div>
+
+      <CreditCardsOverview
+        items={creditCards ?? []}
+        locale={locale}
+        loading={creditCardsLoading}
+        error={creditCardsError}
+        mask={mask}
+        onRetry={() => { void refetchCreditCards() }}
+      />
+
+      {/* Balance flow (existing) */}
+      <div className="grid grid-cols-1 gap-5 mb-5">
         <div className="bg-card rounded-xl border border-border shadow-sm max-h-[420px] flex flex-col">
           <div className="px-5 pt-5 pb-3 shrink-0">
             <div className="flex items-start justify-between mb-0.5">
@@ -1141,6 +1120,8 @@ export default function DashboardPage() {
           })()}
         </div>
       </div>
+      </>
+      )}
 
       {/* Goals Progress Widget */}
       {goalsSummary && goalsSummary.length > 0 && (

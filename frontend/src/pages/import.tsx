@@ -9,7 +9,7 @@ import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import type { ImportPreviewTransaction, ImportReviewTransaction, FailedRow } from '@/types'
+import type { ImportPreviewTransaction, ImportPreviewResponse, ImportReviewTransaction } from '@/types'
 import { Upload, FileText, X, CheckCircle2, AlertCircle, Settings2, Download } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { PageHeader } from '@/components/page-header'
@@ -59,9 +59,10 @@ function TransactionImportPanel() {
   const dateLocale = useDateLocale()
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [previewData, setPreviewData] = useState<{ transactions: ImportPreviewTransaction[]; detected_format: string; csv_columns?: string[]; parse_error?: string | null; failed_rows?: FailedRow[] } | null>(null)
+  const [previewData, setPreviewData] = useState<ImportPreviewResponse | null>(null)
   const [reviewTransactions, setReviewTransactions] = useState<ImportReviewTransaction[]>([])
   const [selectedAccount, setSelectedAccount] = useState('')
+  const [ccAmountSemantics, setCcAmountSemantics] = useState<'' | 'signed' | 'expenses_positive'>('')
   const [dragOver, setDragOver] = useState(false)
   const [fileName, setFileName] = useState<string | null>(null)
   const [currentFile, setCurrentFile] = useState<File | null>(null)
@@ -135,12 +136,27 @@ function TransactionImportPanel() {
           : (rt.suggested_category_id ?? undefined),
         force_uncategorized: rt.selected_category_id === null,
       }))
+      const account = accountsList?.find((a) => a.id === selectedAccount)
+      const included = reviewTransactions.filter((t) => !t.excluded)
+      const allCredits =
+        included.length > 0 && included.every((t) => t.type === 'credit')
+      const needsCcSemantics =
+        account?.type === 'credit_card' && allCredits
+      if (needsCcSemantics && !ccAmountSemantics) {
+        throw new Error(t('import.ccAmountSemanticsRequired'))
+      }
       return transactionsApi.import(
         selectedAccount,
         txns,
         fileName ?? '',
         previewData!.detected_format,
-        isCsvFile ? { detect_duplicates: csvDetectDuplicates } : undefined,
+        {
+          ...(isCsvFile ? { detect_duplicates: csvDetectDuplicates } : {}),
+          import_mac: previewData?.import_mac ?? undefined,
+          ...(needsCcSemantics && ccAmountSemantics
+            ? { amount_semantics: ccAmountSemantics }
+            : {}),
+        },
       )
     },
     onSuccess: (data) => {
@@ -156,12 +172,17 @@ function TransactionImportPanel() {
       setPreviewData(null)
       setReviewTransactions([])
       setSelectedAccount('')
+      setCcAmountSemantics('')
       setFileName(null)
       setCurrentFile(null)
       resetCsvOptions()
       if (fileInputRef.current) fileInputRef.current.value = ''
     },
     onError: (error: unknown) => {
+      if (error instanceof Error && error.message === t('import.ccAmountSemanticsRequired')) {
+        toast.error(error.message)
+        return
+      }
       const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       toast.error(detail || t('import.importError'))
     },
@@ -245,6 +266,7 @@ function TransactionImportPanel() {
     setFileName(null)
     setCurrentFile(null)
     setSelectedAccount('')
+    setCcAmountSemantics('')
     resetCsvOptions()
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
@@ -270,6 +292,12 @@ function TransactionImportPanel() {
   const expenseCount = previewData?.transactions.filter(t => t.type === 'debit').length ?? 0
 
   const includedCount = reviewTransactions.filter(t => !t.excluded).length
+  const selectedAccountObj = accountsList?.find((a) => a.id === selectedAccount)
+  const includedAllCredits =
+    includedCount > 0 &&
+    reviewTransactions.filter((t) => !t.excluded).every((t) => t.type === 'credit')
+  const needsCcAmountSemantics =
+    selectedAccountObj?.type === 'credit_card' && includedAllCredits
 
   return (
     <div className="space-y-6">
@@ -390,6 +418,30 @@ function TransactionImportPanel() {
                 </div>
               )}
             </div>
+            {needsCcAmountSemantics && (
+              <div className="mt-3 flex flex-col gap-2">
+                <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-3 py-2 rounded-lg">
+                  <AlertCircle size={14} className="shrink-0 mt-0.5" />
+                  <span>{t('import.ccAmountSemanticsHint')}</span>
+                </div>
+                <div>
+                  <Label className="text-xs text-muted-foreground mb-1 block">
+                    {t('import.ccAmountSemantics')}
+                  </Label>
+                  <select
+                    className="w-full sm:max-w-md border border-border rounded-lg px-3 py-1.5 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                    value={ccAmountSemantics}
+                    onChange={(e) =>
+                      setCcAmountSemantics(e.target.value as '' | 'signed' | 'expenses_positive')
+                    }
+                  >
+                    <option value="">{t('import.ccAmountSemanticsSelect')}</option>
+                    <option value="expenses_positive">{t('import.ccExpensesPositive')}</option>
+                    <option value="signed">{t('import.ccSignedCredits')}</option>
+                  </select>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* CSV/QIF Options */}
@@ -571,7 +623,12 @@ function TransactionImportPanel() {
             </button>
             <Button
               onClick={() => importMutation.mutate()}
-              disabled={!selectedAccount || importMutation.isPending || includedCount === 0}
+              disabled={
+                !selectedAccount
+                || importMutation.isPending
+                || includedCount === 0
+                || (needsCcAmountSemantics && !ccAmountSemantics)
+              }
               className="gap-2"
             >
               <Upload size={14} />

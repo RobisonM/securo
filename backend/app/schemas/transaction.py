@@ -12,6 +12,39 @@ from app.schemas.transaction_split import (
     TransactionSplitsInput,
 )
 
+# Derived personal-finance meaning (not ledger debit/credit). Computed at
+# read time by ``transaction_classification`` — never persisted.
+TransactionClassification = Literal[
+    "income",
+    "expense",
+    "transfer",
+    "card_payment",
+    "adjustment",
+    "uncertain",
+]
+
+
+class CategorySuggestion(BaseModel):
+    """Historical category suggestion (Epics 3A / 3B). Read-only; never auto-applied.
+
+    ``confidence`` is dominant_count / matching_history_count — not an ML score.
+    ``identity_label`` is an optional human-friendly merchant/payee label for UX.
+    """
+
+    category_id: uuid.UUID
+    category_name: str
+    reason: str
+    reason_code: Literal[
+        "same_payee",
+        "same_merchant",
+        "same_description_signature",
+        "similar_description",  # Epic 3A compatibility
+    ]
+    matched_count: int
+    total_count: int
+    confidence: float
+    identity_label: Optional[str] = None
+
 
 class TransactionBase(BaseModel):
     description: str
@@ -201,6 +234,13 @@ class TransactionRead(TransactionBase):
     parent_owner_name: Optional[str] = None
     is_ignored: bool = False
     exclude_from_pnl: bool = False
+    # Derived at serialization time (not an ORM column). Default is only a
+    # placeholder for bare model_validate constructions; API paths overwrite
+    # via classify_orm after loading counterpart account types in batch.
+    classification: TransactionClassification = "uncertain"
+    # Optional historical suggestion (Epic 3A). Populated only when the list
+    # endpoint is called with include_suggestions=true and category_id is null.
+    category_suggestion: Optional[CategorySuggestion] = None
 
     @model_validator(mode="after")
     def reflect_ignored_category(self):
@@ -301,6 +341,8 @@ class TransactionImportPreview(BaseModel):
     # succeeds (with no transactions) so the UI can show the mapping dropdowns.
     parse_error: Optional[str] = None
     failed_rows: list[FailedRow] = []
+    # HMAC of immutable parse fields; import should echo this to detect drift.
+    import_mac: Optional[str] = None
 
 
 class TransactionImportRequest(BaseModel):
@@ -309,3 +351,11 @@ class TransactionImportRequest(BaseModel):
     filename: str = ""
     detected_format: str = ""
     detect_duplicates: bool = True
+    # Echo of preview.import_mac. When set, server rejects date/amount/type/
+    # description/external_id drift vs preview. Optional for legacy clients.
+    import_mac: Optional[str] = None
+    # Required for credit_card imports that would otherwise be all-credits
+    # from unsigned positive CSV amounts. See import_service validation.
+    amount_semantics: Optional[
+        Literal["signed", "expenses_positive", "expenses_negative"]
+    ] = None

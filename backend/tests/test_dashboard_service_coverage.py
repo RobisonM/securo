@@ -472,11 +472,12 @@ async def test_monthly_trend(session, test_user, test_workspace):
     await _add_txn(session, test_user.id, acc.id, test_workspace.id, 500, "debit", month_start, amount_primary=500)
 
     trends = await get_monthly_trend(session, test_workspace.id, test_user.id, months=6)
-    assert len(trends) >= 1
+    assert len(trends) == 6
     current = next((t for t in trends if t.month == month_start.strftime("%Y-%m")), None)
     assert current is not None
     assert current.income >= 3000.0
     assert current.expenses >= 500.0
+    assert current.net == pytest.approx(current.income - current.expenses)
 
 
 @pytest.mark.asyncio

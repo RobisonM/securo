@@ -53,20 +53,24 @@ async def _attach_invoice_links(session, ctx, items: list) -> None:
         ]
 
 
-def _tag_fx_fallback(tx: TransactionRead, primary_currency: str) -> TransactionRead:
-    """Set fx_fallback=True when a cross-currency tx isn't backed by a real rate.
+async def _serialize_transactions(
+    session: AsyncSession,
+    transactions: list,
+    primary_currency: str,
+) -> list[TransactionRead]:
+    """Batch-serialize ORM rows with derived ``classification`` (no N+1)."""
+    return await transaction_service.build_transaction_reads(
+        session, transactions, primary_currency
+    )
 
-    Covers both the legacy 1:1 fallback rate and rows left unconverted (NULL)
-    because no rate was available at stamp time (issue #353). The UI uses this
-    to warn the user and offer a manual rate.
-    """
-    if tx.currency != primary_currency and (
-        tx.amount_primary is None
-        or tx.fx_rate_used is None
-        or tx.fx_rate_used == 1.0
-    ):
-        tx.fx_fallback = True
-    return tx
+
+async def _serialize_transaction(
+    session: AsyncSession,
+    transaction,
+    primary_currency: str,
+) -> TransactionRead:
+    items = await _serialize_transactions(session, [transaction], primary_currency)
+    return items[0]
 
 
 class TransactionsSummary(BaseModel):
@@ -133,6 +137,13 @@ async def list_transactions(
     max_amount: Optional[float] = Query(None, ge=0, description="Filter to transactions with absolute amount <= this value (primary currency)."),
     sort_by: Optional[str] = Query(None, description="Column to sort by (date|amount|description|payee|category|account|type|status). Default: date desc."),
     sort_dir: str = Query("desc", pattern="^(asc|desc)$"),
+    include_suggestions: bool = Query(
+        False,
+        description=(
+            "When true, attach historical category_suggestion on uncategorized "
+            "rows (Epic 3A). Off by default so normal listings stay cheap."
+        ),
+    ),
     ctx: WorkspaceContext = Depends(current_workspace),
     session: AsyncSession = Depends(get_async_session),
 ):
@@ -159,7 +170,17 @@ async def list_transactions(
         include_summary=True,
     )
     primary_currency = ctx.user.primary_currency
-    items = [_tag_fx_fallback(TransactionRead.model_validate(tx, from_attributes=True), primary_currency) for tx in transactions]
+    items = await _serialize_transactions(session, transactions, primary_currency)
+    if include_suggestions:
+        from app.services.category_suggestion_service import (
+            suggest_categories_for_transactions,
+        )
+
+        suggestions = await suggest_categories_for_transactions(
+            session, ctx.workspace.id, transactions
+        )
+        for item in items:
+            item.category_suggestion = suggestions.get(item.id)
     await _attach_invoice_links(session, ctx, items)
     summary_out = (
         TransactionsSummary(**summary, currency=primary_currency)
@@ -334,9 +355,12 @@ async def create_transfer(
         if debit_tx.transfer_pair_id is None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="transfer_pair cannot be null")
 
+        reads = await _serialize_transactions(
+            session, [debit_full, credit_full], primary_currency
+        )
         return TransferRead(
-            debit=_tag_fx_fallback(TransactionRead.model_validate(debit_full, from_attributes=True), primary_currency),
-            credit=_tag_fx_fallback(TransactionRead.model_validate(credit_full, from_attributes=True), primary_currency),
+            debit=reads[0],
+            credit=reads[1],
             transfer_pair_id=debit_tx.transfer_pair_id,
         )
     except ValueError as e:
@@ -361,9 +385,12 @@ async def link_transfer(
         if debit_tx.transfer_pair_id is None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="transfer_pair cannot be null")
 
+        reads = await _serialize_transactions(
+            session, [debit_full, credit_full], primary_currency
+        )
         return TransferRead(
-            debit=_tag_fx_fallback(TransactionRead.model_validate(debit_full, from_attributes=True), primary_currency),
-            credit=_tag_fx_fallback(TransactionRead.model_validate(credit_full, from_attributes=True), primary_currency),
+            debit=reads[0],
+            credit=reads[1],
             transfer_pair_id=debit_tx.transfer_pair_id,
         )
     except ValueError as e:
@@ -390,9 +417,12 @@ async def create_counterpart(
         if debit_tx.transfer_pair_id is None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="transfer_pair cannot be null")
 
+        reads = await _serialize_transactions(
+            session, [debit_full, credit_full], primary_currency
+        )
         return TransferRead(
-            debit=_tag_fx_fallback(TransactionRead.model_validate(debit_full, from_attributes=True), primary_currency),
-            credit=_tag_fx_fallback(TransactionRead.model_validate(credit_full, from_attributes=True), primary_currency),
+            debit=reads[0],
+            credit=reads[1],
             transfer_pair_id=debit_tx.transfer_pair_id,
         )
     except ValueError as e:
@@ -414,11 +444,7 @@ async def get_transfer_candidates(
     candidates = await transaction_service.get_transfer_candidates(
         session, ctx.workspace.id, transaction_id, limit=limit, window_days=window_days
     )
-    primary_currency = ctx.user.primary_currency
-    return [
-        _tag_fx_fallback(TransactionRead.model_validate(tx, from_attributes=True), primary_currency)
-        for tx in candidates
-    ]
+    return await _serialize_transactions(session, candidates, ctx.user.primary_currency)
 
 
 @router.get("/{transaction_id}/transfer-pair", response_model=Optional[TransactionRead])
@@ -436,9 +462,7 @@ async def get_transfer_pair(
     )
     if not pair:
         return None
-    return _tag_fx_fallback(
-        TransactionRead.model_validate(pair, from_attributes=True), ctx.user.primary_currency
-    )
+    return await _serialize_transaction(session, pair, ctx.user.primary_currency)
 
 
 @router.get("/{transaction_id}", response_model=TransactionRead)
@@ -450,8 +474,7 @@ async def get_transaction(
     transaction = await transaction_service.get_transaction(session, transaction_id, ctx.workspace.id)
     if not transaction:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
-    primary_currency = ctx.user.primary_currency
-    return _tag_fx_fallback(TransactionRead.model_validate(transaction, from_attributes=True), primary_currency)
+    return await _serialize_transaction(session, transaction, ctx.user.primary_currency)
 
 
 @router.post("/installments", response_model=list[TransactionRead], status_code=status.HTTP_201_CREATED)
@@ -468,11 +491,7 @@ async def create_installment_series(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    primary_currency = ctx.user.primary_currency
-    return [
-        _tag_fx_fallback(TransactionRead.model_validate(tx, from_attributes=True), primary_currency)
-        for tx in created
-    ]
+    return await _serialize_transactions(session, created, ctx.user.primary_currency)
 
 
 @router.post("", response_model=TransactionRead, status_code=status.HTTP_201_CREATED)
@@ -486,8 +505,7 @@ async def create_transaction(
             session, ctx.workspace.id, ctx.user_id, data
         )
         full_tx = await transaction_service.get_transaction(session, transaction.id, ctx.workspace.id)
-        primary_currency = ctx.user.primary_currency
-        return _tag_fx_fallback(TransactionRead.model_validate(full_tx, from_attributes=True), primary_currency)
+        return await _serialize_transaction(session, full_tx, ctx.user.primary_currency)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -508,8 +526,7 @@ async def update_transaction(
     if not transaction:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
     transaction = await transaction_service.get_transaction(session, transaction.id, ctx.workspace.id)
-    primary_currency = ctx.user.primary_currency
-    return _tag_fx_fallback(TransactionRead.model_validate(transaction, from_attributes=True), primary_currency)
+    return await _serialize_transaction(session, transaction, ctx.user.primary_currency)
 
 
 @router.patch("/{transaction_id}/ignore", response_model=TransactionRead)
@@ -523,8 +540,8 @@ async def toggle_ignore_transaction(
     )
     if not transaction:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
-    primary_currency = ctx.user.primary_currency
-    return _tag_fx_fallback(TransactionRead.model_validate(transaction, from_attributes=True), primary_currency)
+    transaction = await transaction_service.get_transaction(session, transaction.id, ctx.workspace.id)
+    return await _serialize_transaction(session, transaction, ctx.user.primary_currency)
 
 
 @router.patch("/{transaction_id}/unlink-recurring", response_model=TransactionRead)
@@ -541,8 +558,8 @@ async def unlink_recurring_transaction(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Transaction not found or not linked to a recurring bill",
         )
-    primary_currency = ctx.user.primary_currency
-    return _tag_fx_fallback(TransactionRead.model_validate(transaction, from_attributes=True), primary_currency)
+    transaction = await transaction_service.get_transaction(session, transaction.id, ctx.workspace.id)
+    return await _serialize_transaction(session, transaction, ctx.user.primary_currency)
 
 
 @router.delete("/{transaction_id}", status_code=status.HTTP_204_NO_CONTENT)

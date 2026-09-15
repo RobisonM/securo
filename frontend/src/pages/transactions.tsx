@@ -43,6 +43,10 @@ import { calculateRangeSelection } from '@/lib/selection-utils'
 import { isManualInstallmentSeriesRow } from '@/lib/installment-series'
 import { CategoryIcon } from '@/components/category-icon'
 import { CategorySelect } from '@/components/category-select'
+import { PendingInboxBar } from '@/components/pending-inbox-bar'
+import { PendingSimilarRulePrompt } from '@/components/pending-similar-rule-prompt'
+import { CategorySuggestionActions } from '@/components/category-suggestion-actions'
+import { buildSimilarRuleDraft } from '@/lib/similar-description'
 import { TransactionDialog, type SaveAction, type TransactionSavePayload } from '@/components/transaction-dialog'
 import { extractApiError } from '@/lib/api-errors'
 import { TransactionsColumnPicker } from '@/components/transactions-column-picker'
@@ -213,6 +217,12 @@ export default function TransactionsPage() {
   const [bulkTagInput, setBulkTagInput] = useState<string>('')
   const [createRuleOpen, setCreateRuleOpen] = useState(false)
   const [createRuleInitialData, setCreateRuleInitialData] = useState<RuleDialogInitialData | undefined>(undefined)
+  /** After inline categorize in the pending inbox — optional similar-rule offer. */
+  const [similarRulePrompt, setSimilarRulePrompt] = useState<{
+    tx: Transaction
+    categoryId: string
+    categoryName?: string
+  } | null>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null)
   const highlightId = searchParams.get('highlight')
   const highlightedRowRef = useRef<HTMLTableRowElement | null>(null)
@@ -252,10 +262,15 @@ export default function TransactionsPage() {
     setFilterAccountIds(accounts ? accounts.split(',') : []);
     const urlFrom = searchParams.get('from')
     const urlTo = searchParams.get('to')
+    const urlUncategorized = searchParams.get('uncategorized') === '1'
     if (urlFrom || urlTo) {
       // Explicit range in the URL (shared/bookmarked link) wins.
       setFilterFrom(urlFrom ?? '')
       setFilterTo(urlTo ?? '')
+    } else if (urlUncategorized) {
+      // Pending inbox: show all uncategorized rows, not only the current month.
+      setFilterFrom('')
+      setFilterTo('')
     } else if (!isInitial) {
       // A genuine navigation cleared the range (e.g. Clear filters): show all.
       // On the initial mount we keep the current-month default seeded above.
@@ -378,7 +393,7 @@ export default function TransactionsPage() {
   const noAccounts = filterAccountIds.length === 0
     && activeAccountIds !== null && activeAccountIds.length === 0
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error: listError, refetch } = useQuery({
     queryKey: ['transactions', page, limit, effectiveAccountIds, filterCategoryIds, filterUncategorized, filterPayee, filterGroupId, filterType, filterStatus, filterFrom, filterTo, filterMinAmount, filterMaxAmount, hideIgnored, searchQuery, tagFilters, isMobile ? 'date' : grid.sortBy, isMobile ? 'desc' : grid.sortDir],
     enabled: !noAccounts,
     queryFn: () =>
@@ -399,6 +414,7 @@ export default function TransactionsPage() {
         q: searchQuery || undefined,
         tags: tagFilters.length > 0 ? tagFilters : undefined,
         exclude_ignored: hideIgnored ? true : undefined,
+        include_suggestions: filterUncategorized ? true : undefined,
         // Mobile has no column headers to change sort; force date-desc so
         // the date grouping always works correctly.
         ...(isMobile ? { sort_by: 'date', sort_dir: 'desc' as const } : grid.apiSort),
@@ -741,11 +757,16 @@ export default function TransactionsPage() {
   })
 
   const createRuleMutation = useMutation({
-    mutationFn: (data: Omit<Rule, 'id' | 'user_id'>) => rulesApi.create(data),
+    mutationFn: (data: Omit<Rule, 'id' | 'user_id'> & { fromPendingPrompt?: boolean }) => {
+      const rule = { ...data }
+      delete rule.fromPendingPrompt
+      return rulesApi.create(rule)
+    },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['rules'] })
       setCreateRuleOpen(false)
       setCreateRuleInitialData(undefined)
+      setSimilarRulePrompt(null)
       const applied = result.applied_count ?? 0
       if (applied > 0) {
         invalidateAfterTxMutation()
@@ -755,8 +776,14 @@ export default function TransactionsPage() {
         toast.success(t('rules.created'))
       }
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, variables) => {
       const err = error as { response?: { status?: number } }
+      // Categorize already succeeded when this runs from the similar-rule prompt.
+      if (variables.fromPendingPrompt) {
+        toast.error(t('transactions.ruleCreateFailedAfterCategorize'))
+        setSimilarRulePrompt(null)
+        return
+      }
       if (err?.response?.status === 409) {
         toast.error(t('rules.duplicateName'))
       } else {
@@ -765,9 +792,48 @@ export default function TransactionsPage() {
     },
   })
 
+  /** Inline categorize from the pending inbox — does not open the edit dialog. */
+  const inlineCategorizeMutation = useMutation({
+    mutationFn: ({ id, categoryId }: { id: string; categoryId: string; tx: Transaction; categoryName?: string }) =>
+      transactions.update(id, { category_id: categoryId }),
+    onSuccess: (_data, vars) => {
+      invalidateAfterTxMutation()
+      setSelectedIds((prev) => {
+        if (!prev.has(vars.id)) return prev
+        const next = new Set(prev)
+        next.delete(vars.id)
+        return next
+      })
+      if (filterUncategorized) {
+        setSimilarRulePrompt({
+          tx: vars.tx,
+          categoryId: vars.categoryId,
+          categoryName: vars.categoryName,
+        })
+      } else {
+        toast.success(t('transactions.transactionCategorized'))
+      }
+    },
+    onError: (error) => {
+      toast.error(extractApiError(error))
+    },
+  })
+
+  const handleInlineCategorize = (tx: Transaction, categoryId: string) => {
+    if (!categoryId || tx.is_shared || !canWrite) return
+    const categoryName = (categoriesList ?? []).find((c) => c.id === categoryId)?.name
+    inlineCategorizeMutation.mutate({
+      id: tx.id,
+      categoryId,
+      tx,
+      categoryName,
+    })
+  }
+
   const handleCreateRuleFromTransaction = (tx: Transaction) => {
+    const draft = buildSimilarRuleDraft(tx.description)
     const conditions = [
-      { field: 'description', op: 'contains', value: tx.description },
+      { field: 'description', op: 'contains', value: draft.conditionValue },
     ]
     if (tx.payee_id) {
       conditions.push({ field: 'payee_id', op: 'equals', value: tx.payee_id })
@@ -781,6 +847,18 @@ export default function TransactionsPage() {
     }
     setCreateRuleInitialData({ conditions, actions })
     setCreateRuleOpen(true)
+  }
+
+  const handlePendingInboxToggle = (next: boolean) => {
+    setFilterUncategorized(next)
+    if (next) {
+      setFilterCategoryIds([])
+      // Show all pending rows, not only the current month window.
+      setFilterFrom('')
+      setFilterTo('')
+      setViewMode('list')
+    }
+    setPage(1)
   }
 
   const toggleSelect = (id: string, isShiftKey: boolean = false) => {
@@ -1277,7 +1355,28 @@ export default function TransactionsPage() {
       case 'category':
         return (
           <TableCell key={col.id} style={widthStyle} className={baseClass}>
-            {tx.category ? (
+            {filterUncategorized && canWrite && !tx.is_shared ? (
+              <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                <CategorySelect
+                  value=""
+                  onChange={(next) => {
+                    if (next) handleInlineCategorize(tx, next)
+                  }}
+                  categories={categoriesList ?? []}
+                  groups={categoryGroupsList ?? []}
+                  placeholder={t('transactions.selectCategory')}
+                  disabled={inlineCategorizeMutation.isPending}
+                  className="h-8 text-xs"
+                />
+                {tx.category_suggestion && (
+                  <CategorySuggestionActions
+                    suggestion={tx.category_suggestion}
+                    onAccept={(categoryId) => handleInlineCategorize(tx, categoryId)}
+                    disabled={inlineCategorizeMutation.isPending}
+                  />
+                )}
+              </div>
+            ) : tx.category ? (
               <span className="text-sm text-muted-foreground">{tx.category.name}</span>
             ) : (
               <span className="text-xs text-muted-foreground italic">{t('transactions.noCategory')}</span>
@@ -1442,7 +1541,13 @@ export default function TransactionsPage() {
         filterCategoryIds={filterCategoryIds}
         onCategoryIdsChange={(v) => { setFilterCategoryIds(v); setPage(1) }}
         filterUncategorized={filterUncategorized}
-        onUncategorizedChange={(v) => { setFilterUncategorized(v); setPage(1) }}
+        onUncategorizedChange={(v) => {
+          if (v) handlePendingInboxToggle(true)
+          else {
+            setFilterUncategorized(false)
+            setPage(1)
+          }
+        }}
         filterPayee={filterPayee}
         onPayeeChange={(v) => { setFilterPayee(v); setPage(1) }}
         filterGroupId={filterGroupId}
@@ -1524,6 +1629,14 @@ export default function TransactionsPage() {
         </div>
       )}
 
+      {viewMode === 'list' && (
+        <PendingInboxBar
+          active={filterUncategorized}
+          count={filterUncategorized ? (data?.total ?? null) : null}
+          onToggle={handlePendingInboxToggle}
+        />
+      )}
+
       {viewMode === 'calendar' && (
         <TransactionCalendarView
           calendar={calendarData}
@@ -1543,10 +1656,17 @@ export default function TransactionsPage() {
       {viewMode === 'list' && (
       <div className="bg-card rounded-xl border border-border shadow-sm overflow-hidden mb-4">
         {isLoading ? (
-          <div className="p-6 space-y-3">
+          <div className="p-6 space-y-3" data-testid="transactions-loading">
             {Array.from({ length: 5 }).map((_, i) => (
               <Skeleton key={i} className="h-14 w-full" />
             ))}
+          </div>
+        ) : isError ? (
+          <div className="p-8 text-center space-y-3" data-testid="transactions-error">
+            <p className="text-sm text-destructive">{extractApiError(listError) || t('common.error')}</p>
+            <Button type="button" variant="outline" size="sm" onClick={() => refetch()}>
+              {t('common.retry', 'Retry')}
+            </Button>
           </div>
         ) : isMobile ? (
           /* ── Mobile card view: grouped by date ── */
@@ -1580,13 +1700,40 @@ export default function TransactionsPage() {
                       setEditingTx(t)
                       setDialogOpen(true)
                     }}
+                    categoryAction={
+                      filterUncategorized && canWrite && !tx.is_shared ? (
+                        <div className="space-y-1">
+                          <CategorySelect
+                            value=""
+                            onChange={(next) => {
+                              if (next) handleInlineCategorize(tx, next)
+                            }}
+                            categories={categoriesList ?? []}
+                            groups={categoryGroupsList ?? []}
+                            placeholder={t('transactions.selectCategory')}
+                            disabled={inlineCategorizeMutation.isPending}
+                            className="h-8 text-xs"
+                          />
+                          {tx.category_suggestion && (
+                            <CategorySuggestionActions
+                              suggestion={tx.category_suggestion}
+                              onAccept={(categoryId) => handleInlineCategorize(tx, categoryId)}
+                              disabled={inlineCategorizeMutation.isPending}
+                              compact
+                            />
+                          )}
+                        </div>
+                      ) : undefined
+                    }
                   />
                 ))}
               </div>
             ))}
             {filteredItems.length === 0 && (
-              <div className="text-center py-16 text-muted-foreground">
-                {t('transactions.noResults')}
+              <div className="text-center py-16 text-muted-foreground" data-testid="transactions-empty">
+                {filterUncategorized
+                  ? t('transactions.pendingEmpty')
+                  : t('transactions.noResults')}
               </div>
             )}
           </div>
@@ -1651,8 +1798,10 @@ export default function TransactionsPage() {
               ))}
               {filteredItems.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={grid.visibleColumns.length + 1} className="text-center py-16 text-muted-foreground">
-                    {t('transactions.noResults')}
+                  <TableCell colSpan={grid.visibleColumns.length + 1} className="text-center py-16 text-muted-foreground" data-testid="transactions-empty">
+                    {filterUncategorized
+                      ? t('transactions.pendingEmpty')
+                      : t('transactions.noResults')}
                   </TableCell>
                 </TableRow>
               )}
@@ -2222,6 +2371,43 @@ export default function TransactionsPage() {
         loading={createRuleMutation.isPending}
         initialData={createRuleInitialData}
       />
+
+      {similarRulePrompt && (() => {
+        const draft = buildSimilarRuleDraft(similarRulePrompt.tx.description)
+        return (
+          <PendingSimilarRulePrompt
+            open={!!similarRulePrompt}
+            onClose={() => setSimilarRulePrompt(null)}
+            description={similarRulePrompt.tx.description}
+            categoryId={similarRulePrompt.categoryId}
+            categoryName={similarRulePrompt.categoryName}
+            conditionValue={draft.conditionValue}
+            isStable={draft.isStable}
+            creating={createRuleMutation.isPending}
+            onConfirmCreate={({ name, conditions, actions, apply_to_existing }) => {
+              createRuleMutation.mutate({
+                name,
+                conditions_op: 'and',
+                conditions,
+                actions,
+                priority: 100,
+                is_active: true,
+                apply_to_existing,
+                overwrite_existing_categories: false,
+                fromPendingPrompt: true,
+              })
+            }}
+            onOpenCustomRule={() => {
+              const tx = {
+                ...similarRulePrompt.tx,
+                category_id: similarRulePrompt.categoryId,
+              }
+              setSimilarRulePrompt(null)
+              handleCreateRuleFromTransaction(tx)
+            }}
+          />
+        )
+      })()}
     </div>
   )
 }

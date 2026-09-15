@@ -265,7 +265,9 @@ class TestParseCsv:
         transactions, _ = parse_csv(csv_content.encode("utf-8"))
         assert len(transactions) == 1
         assert transactions[0].payee_raw == "Amazon.com"
-        assert transactions[0].external_id is None
+        # transaction_id is not auto-mapped; missing bank id gets a stable IMP-* id
+        assert transactions[0].external_id is not None
+        assert transactions[0].external_id.startswith("IMP-")
         assert transactions[0].notes == "Gift for John"
 
 class TestParseCsvColumnMapping:
@@ -1037,8 +1039,8 @@ class TestParseOfx:
         assert transactions[0].description == "PIX ENVIADO - FULANO"
 
     def test_parse_ofx_keeps_real_transactions_with_empty_fitid(self):
-        """A real transaction missing a FITID should still be imported (without
-        an external_id), not abort the whole file."""
+        """A real transaction missing a FITID should still be imported with a
+        stable IMP-* external_id (not abort the whole file)."""
         ofx = self._make_ofx(
             "<STMTTRN>\n"
             "<TRNTYPE>DEBIT\n"
@@ -1051,7 +1053,8 @@ class TestParseOfx:
         transactions = parse_ofx(ofx)
 
         assert len(transactions) == 1
-        assert transactions[0].external_id is None
+        assert transactions[0].external_id is not None
+        assert transactions[0].external_id.startswith("IMP-")
         assert transactions[0].description == "UBER TRIP"
         assert transactions[0].amount == Decimal("100.00")
 

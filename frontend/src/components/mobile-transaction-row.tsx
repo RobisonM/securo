@@ -28,6 +28,8 @@ interface MobileTransactionRowProps {
   onClick: (tx: Transaction) => void
   /** Show the payee instead of the account name in an account-scoped view. */
   showPayee?: boolean
+  /** Pending-inbox: category picker rendered under the description. */
+  categoryAction?: React.ReactNode
 }
 
 export function MobileTransactionRow({
@@ -44,6 +46,7 @@ export function MobileTransactionRow({
   onSelect,
   onClick,
   showPayee = false,
+  categoryAction,
 }: MobileTransactionRowProps) {
   const { mask } = usePrivacyMode()
   const { t } = useTranslation()
@@ -164,6 +167,15 @@ export function MobileTransactionRow({
               </span>
             </div>
           )
+        )}
+        {categoryAction && (
+          <div
+            className="mt-1.5"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+          >
+            {categoryAction}
+          </div>
         )}
       </div>
 

@@ -1,0 +1,107 @@
+---
+description: Regras de arquitetura e domínio para gestão financeira pessoal no Securo
+alwaysApply: true
+---
+
+# Personal Finance Project Rules
+
+## Arquitetura
+
+Preservar a arquitetura existente do Securo.
+
+Backend:
+FastAPI + SQLAlchemy + Alembic + PostgreSQL.
+
+Frontend:
+React + TypeScript.
+
+Não criar novas arquiteturas ou frameworks sem necessidade.
+
+A lógica de negócio deve permanecer nos services.
+Routers devem permanecer simples.
+
+## Valores monetários
+
+NUNCA utilizar float para valores monetários.
+
+Utilizar Decimal no Python e NUMERIC/DECIMAL no PostgreSQL.
+
+## Importações
+
+Toda importação deve ser idempotente.
+
+Importar o mesmo arquivo duas vezes não pode criar
+transações duplicadas.
+
+Todo parser deve possuir testes automatizados.
+
+## Transações
+
+Uma transação deve poder ser classificada como:
+
+- income
+- expense
+- transfer
+- card_payment
+- adjustment
+- uncertain
+
+## Transferências
+
+Transferências entre contas do próprio usuário NÃO são despesas.
+
+## Cartão de crédito
+
+Compras realizadas no cartão são despesas.
+
+O pagamento da fatura do cartão NÃO é uma nova despesa.
+
+Caso contrário teremos dupla contabilização.
+
+## Categorização
+
+Prioridade:
+
+1. Regra específica do usuário
+2. Merchant conhecido
+3. Alias do merchant
+4. Regra por descrição
+5. Regra regex
+6. Histórico de classificação
+7. Sugestão automática/IA
+8. Revisão manual
+
+Nunca classificar automaticamente quando a confiança
+for considerada insuficiente.
+
+## Auditoria
+
+Toda transação importada deve preservar:
+
+- origem
+- conta
+- identificador externo
+- arquivo/lote de importação
+- descrição original
+- descrição normalizada
+- data
+- valor
+
+## Segurança
+
+Nunca registrar dados financeiros completos em logs.
+
+Nunca incluir extratos bancários reais no repositório Git.
+
+## Desenvolvimento
+
+Antes de modificar código:
+
+1. analisar implementação existente
+2. listar arquivos afetados
+3. propor solução
+4. implementar
+5. criar testes
+6. executar testes
+
+Evitar refatorações não relacionadas à funcionalidade solicitada.

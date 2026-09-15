@@ -1,16 +1,19 @@
 import csv
 import hashlib
+import hmac
 import io
+import json
 import re
 import uuid
 import warnings
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
 
 from bs4 import XMLParsedAsHTMLWarning
 from ofxparse import OfxParser
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -26,6 +29,11 @@ from app.services.rule_engine import apply_rule_actions, evaluate_conditions, me
 from app.services.rule_service import apply_rules_to_transaction, preview_rules_for_transaction
 from app.services.fx_rate_service import stamp_primary_amount
 from app.services.payee_service import get_or_create_payee
+
+# Synthetic external_id for file rows that lack a bank FITID. Stable across
+# re-parses of the same bytes so reimport stays idempotent without a migration.
+# Format: IMP-{content_sha256_16}:{1-based row index in the parsed file}.
+IMP_EXTERNAL_ID_PREFIX = "IMP-"
 
 
 # Descriptions used by some Brazilian banks (e.g. Banco do Brasil) for
@@ -48,6 +56,121 @@ def _decode_ofx_bytes(content: bytes) -> tuple[str, str]:
         return content.decode("utf-8"), "utf-8"
     except UnicodeDecodeError:
         return content.decode("latin-1"), "latin-1"
+
+
+def decode_csv_text(content: bytes) -> str:
+    """Decode CSV bytes with a conservative BR-friendly fallback chain.
+
+    Order: utf-8-sig (BOM) → utf-8 → cp1252. cp1252 is last because it
+    decodes any byte sequence; we only reach it when UTF-8 is invalid so
+    we never silently mojibake a valid UTF-8 file.
+    """
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    # cp1252 theoretically always succeeds; keep a clear error if that changes.
+    raise UnicodeDecodeError("cp1252", content, 0, 1, "unable to decode CSV bytes")
+
+
+def content_fingerprint(content: bytes) -> str:
+    """Short stable fingerprint of raw file bytes (not logged with contents)."""
+    return hashlib.sha256(content).hexdigest()[:16]
+
+
+def assign_import_external_ids(
+    transactions: list[TransactionImport], content: bytes
+) -> None:
+    """Fill missing external_id with IMP-{file_fp}:{row} for idempotent reimport.
+
+    Bank FITIDs are left untouched. Row index is 1-based over the full parsed
+    list so two identical purchases in one file get distinct ids.
+    """
+    fp = content_fingerprint(content)
+    for index, txn in enumerate(transactions, start=1):
+        if not txn.external_id:
+            txn.external_id = f"{IMP_EXTERNAL_ID_PREFIX}{fp}:{index}"
+
+
+def is_synthetic_import_external_id(external_id: str | None) -> bool:
+    return bool(external_id) and external_id.startswith(IMP_EXTERNAL_ID_PREFIX)
+
+
+def compute_import_mac(transactions: list[TransactionImport]) -> str:
+    """HMAC over immutable preview fields so import can detect payload drift.
+
+    Category / excluded / suggestions are intentionally omitted — the review UI
+    may change those after preview. date/amount/type/description/external_id
+    must match what preview produced.
+    """
+    payload = [
+        {
+            "date": t.date.isoformat(),
+            "amount": str(t.amount),
+            "type": t.type,
+            "description": t.description,
+            "external_id": t.external_id or "",
+        }
+        for t in transactions
+    ]
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    key = get_settings().secret_key.get_secret_value().encode("utf-8")
+    return hmac.new(key, raw.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify_import_mac(
+    transactions: list[TransactionImport], import_mac: str | None
+) -> bool:
+    """Return True when mac is absent (legacy clients) or matches."""
+    if not import_mac:
+        return True
+    expected = compute_import_mac(transactions)
+    return hmac.compare_digest(expected, import_mac)
+
+
+def apply_amount_semantics(
+    transactions: list[TransactionImport],
+    amount_semantics: str | None,
+) -> None:
+    """Apply explicit amount direction for credit-card CSVs (mutates in place)."""
+    if amount_semantics == "expenses_positive":
+        for txn in transactions:
+            if not txn.excluded and txn.type == "credit":
+                txn.type = "debit"
+
+
+class CreditCardAmountSemanticsError(ValueError):
+    """Raised when a credit-card import would silently treat expenses as credits."""
+
+
+def validate_credit_card_amount_semantics(
+    account_type: str | None,
+    transactions: list[TransactionImport],
+    amount_semantics: str | None,
+) -> None:
+    """Refuse ambiguous all-credit imports onto credit_card without explicit semantics.
+
+    A single-file bill payment (one credit) or a refund-only export is valid when
+    the client sets amount_semantics='signed'. Purchase CSVs with unsigned
+    positive amounts must use expenses_positive (or flip_amount at preview so
+    rows arrive as debits).
+    """
+    if account_type != "credit_card":
+        return
+    included = [t for t in transactions if not t.excluded]
+    if not included:
+        return
+    if any(t.type == "debit" for t in included):
+        return
+    if amount_semantics in ("signed", "expenses_positive", "expenses_negative"):
+        return
+    raise CreditCardAmountSemanticsError(
+        "Credit card import has only credit rows. Set amount_semantics to "
+        "'expenses_positive' (purchases listed as positive amounts), "
+        "'signed' (true credits such as payments/refunds), or re-preview "
+        "with flip_amount so purchases arrive as debits."
+    )
 
 
 def _patch_empty_fitids(text: str) -> str:
@@ -183,6 +306,7 @@ def parse_ofx(content: bytes) -> list[TransactionImport]:
                 payee_raw=raw_payee,
             ))
 
+    assign_import_external_ids(transactions, content)
     return transactions
 
 
@@ -292,6 +416,7 @@ def parse_qif(content: bytes, date_format: str | None = None) -> list[Transactio
             payee_raw=payee,
         ))
 
+    assign_import_external_ids(transactions, content)
     return transactions
 
 
@@ -387,11 +512,13 @@ def parse_camt(content: bytes) -> list[TransactionImport]:
                 currency=txn_currency,
             ))
 
+    assign_import_external_ids(transactions, content)
     return transactions
 
 
 DATE_FORMAT_MAP = {
     'DD/MM/YYYY': '%d/%m/%Y',
+    'DD-MM-YYYY': '%d-%m-%Y',
     'MM/DD/YYYY': '%m/%d/%Y',
     'YYYY-MM-DD': '%Y-%m-%d',
 }
@@ -419,7 +546,7 @@ def detect_csv_columns(content: bytes) -> list[str]:
     Used by the import preview so the UI can offer accurate column-mapping
     dropdowns instead of guessing headers client-side.
     """
-    text = content.decode('utf-8-sig')  # Handle BOM
+    text = decode_csv_text(content)
     dialect = _sniff_csv_dialect(text)
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
     return [f.strip() for f in (reader.fieldnames or []) if f and f.strip()]
@@ -446,7 +573,7 @@ def parse_csv(
     - column_mapping: explicit Securo-field -> CSV-header map. Any field
       present here overrides auto-detection; unmapped fields still auto-detect.
     """
-    text = content.decode('utf-8-sig')  # Handle BOM
+    text = decode_csv_text(content)
     dialect = _sniff_csv_dialect(text)
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
 
@@ -636,6 +763,7 @@ def parse_csv(
             notes=txn_notes,
         ))
 
+    assign_import_external_ids(transactions, content)
     return transactions, failed_rows
 
 
@@ -713,6 +841,7 @@ async def import_transactions(
     filename: str = "",
     detected_format: str = "",
     detect_duplicates: bool = True,
+    amount_semantics: str | None = None,
 ) -> tuple[int, int, int, uuid.UUID]:
     """Import transactions into an account in the given workspace.
 
@@ -723,6 +852,21 @@ async def import_transactions(
 
     included = [t for t in transactions if not t.excluded]
     excluded_count = len(transactions) - len(included)
+
+    # Look up account early — currency fallback + credit-card sign checks.
+    account_result = await session.execute(
+        select(Account).where(Account.id == account_id)
+    )
+    account = account_result.scalar_one_or_none()
+    account_currency = account.currency if account else get_settings().default_currency
+    account_type = account.type if account else None
+
+    validate_credit_card_amount_semantics(
+        account_type, transactions, amount_semantics
+    )
+    apply_amount_semantics(transactions, amount_semantics)
+    # Recompute included types after possible semantics flip.
+    included = [t for t in transactions if not t.excluded]
 
     # Calculate summaries from included transactions only
     total_credit = sum(t.amount for t in included if t.type == "credit")
@@ -741,13 +885,6 @@ async def import_transactions(
     )
     session.add(import_log)
     await session.flush()  # Get the import_log.id
-
-    # Look up account currency for fallback
-    account_result = await session.execute(
-        select(Account).where(Account.id == account_id)
-    )
-    account = account_result.scalar_one_or_none()
-    account_currency = account.currency if account else get_settings().default_currency
 
     # Build category name → id map scoped to the workspace, on the same terms
     # the preview used: hidden categories excluded, names matched
@@ -769,6 +906,8 @@ async def import_transactions(
     skipped = 0
     effective_format = (detected_format or source or "").lower()
     should_detect_duplicates = detect_duplicates if effective_format == "csv" else True
+    # Occurrence index within this batch for soft (no bank FITID) keys.
+    soft_occurrence: dict[tuple, int] = defaultdict(int)
 
     for txn_data in included:
         # Resolve currency: CSV value > account currency
@@ -777,9 +916,10 @@ async def import_transactions(
         if should_detect_duplicates:
             # Prefer an external ID (OFX FITID), with date retained because some
             # Brazilian cards reuse one purchase FITID across monthly installments.
-            # Formats without unique IDs fall back to transaction fields; compare
-            # both descriptions because rules may have changed the displayed one.
-            if txn_data.external_id:
+            skip_as_duplicate = False
+            if txn_data.external_id and not is_synthetic_import_external_id(
+                txn_data.external_id
+            ):
                 existing = await session.execute(
                     select(Transaction).where(
                         Transaction.account_id == account_id,
@@ -787,23 +927,51 @@ async def import_transactions(
                         Transaction.date == txn_data.date,
                     )
                 )
+                if existing.scalars().first() is not None:
+                    skip_as_duplicate = True
             else:
-                existing = await session.execute(
-                    select(Transaction).where(
-                        Transaction.account_id == account_id,
-                        Transaction.date == txn_data.date,
-                        Transaction.amount == txn_data.amount,
-                        Transaction.type == txn_data.type,
-                        or_(
-                            Transaction.description == txn_data.description,
-                            Transaction.original_description == txn_data.description,
-                        ),
+                # Synthetic IMP-* ids or missing id: match by stable id first,
+                # then by soft field key with occurrence counting so two
+                # identical purchases in one file stay distinct, while
+                # reimport and exact cross-format copies still skip.
+                if txn_data.external_id:
+                    by_id = await session.execute(
+                        select(Transaction).where(
+                            Transaction.account_id == account_id,
+                            Transaction.external_id == txn_data.external_id,
+                            Transaction.date == txn_data.date,
+                        )
                     )
-                )
-            # `.first()` is intentional: duplicate keys can legitimately match
-            # multiple rows after an import/sync race or reused bank identifier,
-            # and duplicate detection only needs to establish that any row exists.
-            if existing.scalars().first() is not None:
+                    if by_id.scalars().first() is not None:
+                        skip_as_duplicate = True
+
+                if not skip_as_duplicate:
+                    soft_key = (
+                        txn_data.date,
+                        txn_data.amount,
+                        txn_data.type,
+                        txn_data.description,
+                    )
+                    soft_occurrence[soft_key] += 1
+                    occurrence = soft_occurrence[soft_key]
+                    existing_count = await session.scalar(
+                        select(func.count())
+                        .select_from(Transaction)
+                        .where(
+                            Transaction.account_id == account_id,
+                            Transaction.date == txn_data.date,
+                            Transaction.amount == txn_data.amount,
+                            Transaction.type == txn_data.type,
+                            or_(
+                                Transaction.description == txn_data.description,
+                                Transaction.original_description == txn_data.description,
+                            ),
+                        )
+                    )
+                    if occurrence <= int(existing_count or 0):
+                        skip_as_duplicate = True
+
+            if skip_as_duplicate:
                 skipped += 1
                 continue
 
@@ -935,6 +1103,18 @@ async def import_transactions(
     # row is written: settling an invoice creates an allocation pointing
     # at a transaction, which has to exist first.
     await reconciliation_service.match_incoming(session, workspace_id, landed)
+
+    # Same transfer detection the bank-sync path runs: at least one leg must
+    # be newly imported (candidate_ids). Conservative scoring inside the
+    # detector refuses amount/date-only matches and ambiguous ties.
+    if imported > 0 and landed:
+        from app.services.transfer_detection_service import detect_transfer_pairs
+
+        await detect_transfer_pairs(
+            session,
+            workspace_id,
+            candidate_ids=[tx.id for tx in landed],
+        )
 
     await session.commit()
     return imported, skipped, excluded_count, import_log.id

@@ -145,6 +145,7 @@ async def preview_import(
         csv_columns=csv_columns,
         parse_error=parse_error,
         failed_rows=failed_rows,
+        import_mac=import_service.compute_import_mac(transactions),
     )
 
 
@@ -161,11 +162,27 @@ async def import_transactions(
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
-    imported, skipped, excluded, import_log_id = await import_service.import_transactions(
-        session, ctx.workspace.id, ctx.user_id, data.account_id, data.transactions, "import",
-        filename=data.filename, detected_format=data.detected_format,
-        detect_duplicates=data.detect_duplicates,
-    )
+    if not import_service.verify_import_mac(data.transactions, data.import_mac):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Import payload does not match preview (date, amount, type, "
+                "description, or external_id changed). Re-run preview and try again."
+            ),
+        )
+
+    try:
+        imported, skipped, excluded, import_log_id = await import_service.import_transactions(
+            session, ctx.workspace.id, ctx.user_id, data.account_id, data.transactions, "import",
+            filename=data.filename, detected_format=data.detected_format,
+            detect_duplicates=data.detect_duplicates,
+            amount_semantics=data.amount_semantics,
+        )
+    except import_service.CreditCardAmountSemanticsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
     return {
         "imported": imported,
