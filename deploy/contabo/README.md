@@ -16,23 +16,27 @@ Hoje no painel Cloudflare, `financas.agromei.com.br` aponta para `http://agromon
 
 ## 1. Descobrir a rede do tunnel
 
-Na VPS:
+Na VPS (o nome do container pode variar — use `docker ps`):
 
 ```bash
+docker ps --format '{{.Names}}'
 docker network ls
-docker inspect n8n --format '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
-# ou
-docker inspect cloudflared --format '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
+
+# troque NOME pelo container do tunnel ou de um app que já funciona (ex. n8n-1)
+docker inspect NOME --format '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
 ```
 
-Anote o nome da rede compartilhada (ex.: `cloudflare`, `proxy`, `traefik_default`, nome do compose do tunnel). Esse valor vai em `CLOUDFLARE_TUNNEL_NETWORK`.
+Anote **uma** rede compartilhada com o `cloudflared`. Esse valor vai em `CLOUDFLARE_TUNNEL_NETWORK`.
 
-## 2. Clone
+## 2. Clone (caminho limpo)
+
+Evite aninhar `deploy/contabo` dentro de outro `deploy/contabo`.
 
 ```bash
-sudo mkdir -p /opt/apps
-cd /opt/apps
-git clone -b feature/finance-br https://github.com/RobisonM/securo.git
+sudo mkdir -p /opt
+cd /opt
+# se já existir um clone bagunçado, use /opt/securo limpo:
+git clone -b feature/finance-br https://github.com/RobisonM/securo.git securo
 cd securo
 mkdir -p secrets
 cd deploy/contabo

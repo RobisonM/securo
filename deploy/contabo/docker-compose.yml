@@ -131,8 +131,10 @@ services:
     depends_on:
       - backend
     networks:
-      - internal
-      - tunnel
+      internal:
+      tunnel:
+        aliases:
+          - securo-frontend
     restart: unless-stopped
 
   celery-worker:
