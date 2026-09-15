@@ -1,20 +1,33 @@
-# Securo na Contabo (Docker)
+# Securo na Contabo + Cloudflare Tunnel
 
-Deploy do **Securo Brasil V1** (`feature/finance-br`) na mesma VPS que suas outras stacks Docker.
+Deploy do **Securo Brasil V1** (`feature/finance-br`) na mesma VPS das suas outras apps Docker, exposto por **Cloudflare Zero Trust → Rotas de aplicativos publicados** (mesmo padrão de `n8n:5678` e `fire-monitor-agro:5000`).
 
-- Build a partir deste repositório (não usa `ghcr.io/securo-finance/*` — essas imagens ainda não têm o código BR).
-- Frontend só em `127.0.0.1:<FRONTEND_PORT>` para não brigar com NPM/Traefik/Caddy nas portas 80/443.
-- Backend, Postgres e Redis ficam só na rede interna do Compose.
-- Agents/MCP desligados por padrão (menos RAM).
+| Público | Serviço interno |
+|---------|-----------------|
+| `https://financas.agromei.com.br` | `http://securo-frontend:8080` |
 
-## Pré-requisitos na VPS
+Hoje no painel Cloudflare, `financas.agromei.com.br` aponta para `http://agromonitor-edge:80` — isso precisa ser **alterado** para o Securo.
 
-- Docker Engine + Docker Compose v2
-- Reverse proxy já rodando (Nginx Proxy Manager, Traefik, Caddy, etc.)
-- Domínio DNS apontando para o IP da Contabo
+## Pré-requisitos
+
+- Docker Engine + Compose v2
+- `cloudflared` já rodando e na mesma rede Docker que `n8n` / `agromonitor-edge`
 - Git
 
-## 1. Clone
+## 1. Descobrir a rede do tunnel
+
+Na VPS:
+
+```bash
+docker network ls
+docker inspect n8n --format '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
+# ou
+docker inspect cloudflared --format '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
+```
+
+Anote o nome da rede compartilhada (ex.: `cloudflare`, `proxy`, `traefik_default`, nome do compose do tunnel). Esse valor vai em `CLOUDFLARE_TUNNEL_NETWORK`.
+
+## 2. Clone
 
 ```bash
 sudo mkdir -p /opt/apps
@@ -25,26 +38,22 @@ mkdir -p secrets
 cd deploy/contabo
 ```
 
-## 2. Ambiente
+## 3. Ambiente
 
 ```bash
 cp .env.example .env
-nano .env   # ou vim
+nano .env
 ```
 
-Obrigatório ajustar:
-
-| Variável | Exemplo |
-|----------|---------|
+| Variável | Valor |
+|----------|--------|
 | `SECRET_KEY` | `openssl rand -hex 32` |
 | `POSTGRES_PASSWORD` | `openssl rand -hex 24` |
-| `FRONTEND_URL` | `https://securo.seudominio.com` (sem barra final) |
-| `FRONTEND_PORT` | `3132` (livre no host; só loopback) |
+| `FRONTEND_URL` | `https://financas.agromei.com.br` |
+| `CLOUDFLARE_TUNNEL_NETWORK` | rede descoberta no passo 1 |
+| `TRUSTED_PROXY_HOPS` | `2` (cloudflared → nginx → backend) |
 
-`TRUSTED_PROXY_HOPS=2` assume: **Internet → NPM/Traefik → nginx do frontend → backend**.  
-Se o TLS terminar direto no container frontend, use `1`.
-
-## 3. Subir
+## 4. Subir
 
 ```bash
 docker compose up -d --build
@@ -52,109 +61,81 @@ docker compose ps
 docker compose logs -f backend
 ```
 
-Aguarde `alembic upgrade head` e o Uvicorn no backend. O frontend escuta em `127.0.0.1:3132` (ou a porta do `.env`).
-
-## 4. Reverse proxy
-
-### Nginx Proxy Manager
-
-1. **Hosts → Proxy Hosts → Add Proxy Host**
-2. **Domain:** `securo.seudominio.com`
-3. **Scheme:** `http`
-4. **Forward Hostname / IP:** `127.0.0.1` (ou `host.docker.internal` / IP da bridge do host, se o NPM estiver em outro container sem `network_mode: host`)
-5. **Forward Port:** `3132` (seu `FRONTEND_PORT`)
-6. **SSL:** Let’s Encrypt, force SSL
-7. Websockets: ligado (recomendado)
-
-Se o NPM não alcançar `127.0.0.1` do host (container isolado), use o IP do gateway Docker do host (ex.: `172.17.0.1`) ou coloque o NPM na mesma rede externa e publique o frontend nessa rede — o padrão deste compose é loopback no host.
-
-### Traefik (labels)
-
-Este compose não adiciona labels Traefik por padrão (mantém o stack simples). Opções:
-
-1. Proxy no Traefik apontando para `http://127.0.0.1:3132`, ou
-2. Adicione um `docker-compose.override.yml` local com labels no serviço `frontend` e uma rede externa `traefik` (não versionar secrets).
-
-### Caddy
-
-Exemplo no `Caddyfile` do host:
-
-```caddy
-securo.seudominio.com {
-  reverse_proxy 127.0.0.1:3132
-}
-```
-
-## 5. Validação
-
-1. Abra `https://securo.seudominio.com`
-2. Crie conta / workspace
-3. Confirme dashboard vazio (CTA de import) e depois um import sintético
+Confirme o DNS Docker na rede do tunnel:
 
 ```bash
-curl -sI http://127.0.0.1:3132 | head -n 5
-docker compose exec backend alembic current
+docker run --rm --network "$CLOUDFLARE_TUNNEL_NETWORK" alpine wget -qO- http://securo-frontend:8080 | head
+# ou, se alpine não tiver wget:
+docker run --rm --network "$(grep CLOUDFLARE_TUNNEL_NETWORK .env | cut -d= -f2)" curlimages/curl -sI http://securo-frontend:8080
 ```
 
-## 6. Atualizar
+## 5. Cloudflare Zero Trust — rota publicada
+
+1. Zero Trust → Networks → Tunnels → seu tunnel → **Public Hostname**
+2. Edite **`financas.agromei.com.br`**
+3. **Path:** `*` (igual às outras)
+4. **Service / URL:** `http://securo-frontend:8080`  
+   (substitua `http://agromonitor-edge:80`)
+5. Salve
+
+Não é necessário abrir porta no host nem Let’s Encrypt no servidor — o TLS fica na Cloudflare.
+
+```mermaid
+flowchart LR
+  User --> CF["Cloudflare Edge"]
+  CF --> Tunnel["cloudflared"]
+  Tunnel --> FE["securo-frontend:8080"]
+  FE --> API["backend:8000"]
+  API --> DB["postgres"]
+  API --> Redis
+```
+
+## 6. Validação
+
+1. Abra `https://financas.agromei.com.br`
+2. Crie conta / workspace
+3. Dashboard vazio com CTA de import
+
+```bash
+docker compose exec backend alembic current
+docker compose logs frontend --tail 50
+```
+
+## 7. Atualizar
 
 ```bash
 cd /opt/apps/securo
-git fetch origin
-git checkout feature/finance-br
 git pull --ff-only origin feature/finance-br
 cd deploy/contabo
 docker compose up -d --build
 ```
 
-Volumes (`pgdata`, `attachments`) são preservados.
-
-## 7. Backup rápido
+## 8. Backup
 
 ```bash
-# Postgres
 docker compose exec -T db pg_dump -U postgres securo | gzip > securo-$(date +%F).sql.gz
-
-# Anexos (volume Docker)
-docker run --rm -v securo_attachments:/data -v "$PWD":/backup alpine \
-  tar czf /backup/securo-attachments-$(date +%F).tar.gz -C /data .
+docker volume ls | grep securo
 ```
 
-O nome do volume pode incluir o project name (`securo_attachments`). Confira com `docker volume ls | grep securo`.
+## Layout
 
-## 8. Parar / remover (cuidado)
-
-```bash
-docker compose down          # mantém volumes
-docker compose down -v       # APAGA banco e anexos
-```
-
-## Layout de portas
-
-| Serviço | Host | Interno |
-|---------|------|---------|
-| frontend | `127.0.0.1:FRONTEND_PORT` | 8080 |
-| backend | — | 8000 |
-| db | — | 5432 |
-| redis | — | 6379 |
-| celery | — | — |
+| Serviço | Exposição |
+|---------|-----------|
+| `securo-frontend` | rede do tunnel (`8080`) — sem porta no host |
+| `backend` / `db` / `redis` / celery | só rede `internal` do Compose |
 
 ## Segurança
 
-- Não commitar `.env` (já coberto pelo `.gitignore` raiz).
-- Não publicar Postgres/backend em `0.0.0.0`.
-- Troque `SECRET_KEY` e `POSTGRES_PASSWORD` antes do primeiro `up`.
-- PEM Enable Banking (se usar): `../../secrets/enable_banking_private.pem`.
+- Não commitar `.env`
+- DB/backend não entram na rede do tunnel
+- Troque `SECRET_KEY` e `POSTGRES_PASSWORD` no primeiro deploy
 
 ## Agents (opcional)
 
-Só se a VPS tiver RAM de sobra:
-
 ```bash
-# no .env
+# .env
 AGENTS_ENABLED=true
 AGENTS_MCP_JWT_SECRET=$(openssl rand -hex 32)
 COMPOSE_PROFILES=agents
-
 docker compose --profile agents up -d --build
 ```
