@@ -3,8 +3,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, SmallInteger, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, Numeric, SmallInteger, String
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -51,6 +51,12 @@ class Account(Base):
     )
     is_closed: Mapped[bool] = mapped_column(Boolean, default=False)
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Optional CSV/OFX-adjacent import layout for this account (header_row,
+    # delimiter, column_mapping, amount_semantics, date_format). Null means
+    # use the generic importer defaults / per-upload UI options.
+    import_profile: Mapped[Optional[dict]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
 
     connection: Mapped[Optional["BankConnection"]] = relationship(back_populates="accounts")
     institution: Mapped[Optional["Institution"]] = relationship(

@@ -23,7 +23,7 @@ import {
 import { DatePickerInput } from '@/components/ui/date-picker-input'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { Account, BankConnection } from '@/types'
+import type { Account, AccountImportProfile, BankConnection } from '@/types'
 import { RefreshCw, TriangleAlert, Unlink, Settings } from 'lucide-react'
 import { AccountIcon, ConnectionLogo } from '@/components/account-icon'
 import { getAccountTypeConfig } from '@/lib/account-type-config'
@@ -165,8 +165,17 @@ export default function AccountsPage() {
   })
 
   const createMutation = useMutation({
-    mutationFn: (data: { name: string; type: string; balance?: number; currency?: string }) =>
-      accounts.create(data),
+    mutationFn: (data: {
+      name: string
+      type: string
+      balance?: number
+      balance_date?: string
+      currency?: string
+      credit_limit?: number | null
+      statement_close_day?: number | null
+      payment_due_day?: number | null
+      import_profile?: AccountImportProfile | null
+    }) => accounts.create(data),
     onSuccess: () => {
       invalidateFinancialQueries(queryClient)
       setDialogOpen(false)
@@ -644,13 +653,64 @@ export default function AccountsPage() {
           if (editingAccount) {
             updateMutation.mutate({ id: editingAccount.id, ...data })
           } else {
-            createMutation.mutate(data as { name: string; type: string; balance?: number; balance_date?: string; currency?: string })
+            createMutation.mutate(data as {
+              name: string
+              type: string
+              balance?: number
+              balance_date?: string
+              currency?: string
+              import_profile?: AccountImportProfile | null
+            })
           }
         }}
         loading={createMutation.isPending || updateMutation.isPending}
       />
     </div>
   )
+}
+
+function buildImportProfile(opts: {
+  headerRow: string
+  delimiter: string
+  dateFormat: string
+  amountSemantics: string
+  flipAmount: boolean
+  mapDate: string
+  mapDescription: string
+  mapAmount: string
+  mapNotes: string
+}): AccountImportProfile | null {
+  const column_mapping: Record<string, string> = {}
+  if (opts.mapDate.trim()) column_mapping.date = opts.mapDate.trim()
+  if (opts.mapDescription.trim()) column_mapping.description = opts.mapDescription.trim()
+  if (opts.mapAmount.trim()) column_mapping.amount = opts.mapAmount.trim()
+  if (opts.mapNotes.trim()) column_mapping.notes = opts.mapNotes.trim()
+
+  const header_row = opts.headerRow.trim() ? parseInt(opts.headerRow, 10) : null
+  const profile: AccountImportProfile = {
+    ...(header_row && Number.isFinite(header_row) && header_row >= 1 ? { header_row } : {}),
+    ...(opts.delimiter ? { delimiter: opts.delimiter } : {}),
+    ...(opts.dateFormat ? { date_format: opts.dateFormat } : {}),
+    ...(opts.amountSemantics
+      ? { amount_semantics: opts.amountSemantics as AccountImportProfile['amount_semantics'] }
+      : {}),
+    ...(opts.flipAmount ? { flip_amount: true } : {}),
+    ...(Object.keys(column_mapping).length > 0 ? { column_mapping } : {}),
+  }
+  return Object.keys(profile).length > 0 ? profile : null
+}
+
+const SICREDI_FATURA_PRESET: AccountImportProfile = {
+  header_row: 20,
+  delimiter: ';',
+  date_format: 'DD/MM/YYYY',
+  flip_amount: true,
+  column_mapping: {
+    date: 'Data',
+    description: 'Descrição',
+    amount: 'Valor',
+    notes: 'Parcela',
+  },
 }
 
 function AccountDialog({
@@ -673,6 +733,7 @@ function AccountDialog({
     credit_limit?: number | null
     statement_close_day?: number | null
     payment_due_day?: number | null
+    import_profile?: AccountImportProfile | null
   }) => void
   loading: boolean
 }) {
@@ -694,6 +755,17 @@ function AccountDialog({
   const [statementCloseDay, setStatementCloseDay] = useState(account?.statement_close_day?.toString() ?? '')
   const [paymentDueDay, setPaymentDueDay] = useState(account?.payment_due_day?.toString() ?? '')
 
+  const profile = account?.import_profile
+  const [headerRow, setHeaderRow] = useState(profile?.header_row?.toString() ?? '')
+  const [delimiter, setDelimiter] = useState(profile?.delimiter ?? '')
+  const [importDateFormat, setImportDateFormat] = useState(profile?.date_format ?? '')
+  const [amountSemantics, setAmountSemantics] = useState(profile?.amount_semantics ?? '')
+  const [flipAmount, setFlipAmount] = useState(!!profile?.flip_amount)
+  const [mapDate, setMapDate] = useState(profile?.column_mapping?.date ?? '')
+  const [mapDescription, setMapDescription] = useState(profile?.column_mapping?.description ?? '')
+  const [mapAmount, setMapAmount] = useState(profile?.column_mapping?.amount ?? '')
+  const [mapNotes, setMapNotes] = useState(profile?.column_mapping?.notes ?? '')
+
   const [formSource, setFormSource] = useState<{ account: typeof account } | null>(null)
   if (!formSource || formSource.account !== account) {
     setFormSource({ account })
@@ -706,11 +778,34 @@ function AccountDialog({
     setCreditLimit(account?.credit_limit?.toString() ?? '')
     setStatementCloseDay(account?.statement_close_day?.toString() ?? '')
     setPaymentDueDay(account?.payment_due_day?.toString() ?? '')
+    const p = account?.import_profile
+    setHeaderRow(p?.header_row?.toString() ?? '')
+    setDelimiter(p?.delimiter ?? '')
+    setImportDateFormat(p?.date_format ?? '')
+    setAmountSemantics(p?.amount_semantics ?? '')
+    setFlipAmount(!!p?.flip_amount)
+    setMapDate(p?.column_mapping?.date ?? '')
+    setMapDescription(p?.column_mapping?.description ?? '')
+    setMapAmount(p?.column_mapping?.amount ?? '')
+    setMapNotes(p?.column_mapping?.notes ?? '')
+  }
+
+  function applySicrediPreset() {
+    const p = SICREDI_FATURA_PRESET
+    setHeaderRow(String(p.header_row))
+    setDelimiter(p.delimiter ?? '')
+    setImportDateFormat(p.date_format ?? '')
+    setAmountSemantics('')
+    setFlipAmount(!!p.flip_amount)
+    setMapDate(p.column_mapping?.date ?? '')
+    setMapDescription(p.column_mapping?.description ?? '')
+    setMapAmount(p.column_mapping?.amount ?? '')
+    setMapNotes(p.column_mapping?.notes ?? '')
   }
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent>
+      <DialogContent className="max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
             {account ? t('accounts.editAccount') : t('accounts.addManual')}
@@ -734,6 +829,17 @@ function AccountDialog({
                 credit_limit: creditLimit !== '' ? parseFloat(creditLimit) : null,
                 statement_close_day: parseDay(statementCloseDay),
                 payment_due_day: parseDay(paymentDueDay),
+              }),
+              import_profile: buildImportProfile({
+                headerRow,
+                delimiter,
+                dateFormat: importDateFormat,
+                amountSemantics,
+                flipAmount,
+                mapDate,
+                mapDescription,
+                mapAmount,
+                mapNotes,
               }),
             })
           }}
@@ -867,6 +973,96 @@ function AccountDialog({
               </div>
             </div>
           )}
+
+          <div className="space-y-3 rounded-lg border border-border p-4">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <Label className="text-sm font-medium">{t('accounts.importProfile')}</Label>
+                <p className="text-xs text-muted-foreground mt-1">{t('accounts.importProfileHint')}</p>
+              </div>
+              <Button type="button" variant="outline" size="sm" onClick={applySicrediPreset}>
+                {t('accounts.importPresetSicredi')}
+              </Button>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label>{t('accounts.importHeaderRow')}</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  value={headerRow}
+                  onChange={(e) => setHeaderRow(e.target.value)}
+                  placeholder="1"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('accounts.importDelimiter')}</Label>
+                <select
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                  value={delimiter}
+                  onChange={(e) => setDelimiter(e.target.value)}
+                >
+                  <option value="">{t('accounts.importDelimiterAuto')}</option>
+                  <option value=";">;</option>
+                  <option value=",">,</option>
+                  <option value={'\t'}>Tab</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label>{t('accounts.importDateFormat')}</Label>
+                <select
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                  value={importDateFormat}
+                  onChange={(e) => setImportDateFormat(e.target.value)}
+                >
+                  <option value="">{t('accounts.importDateFormatAuto')}</option>
+                  <option value="DD/MM/YYYY">DD/MM/YYYY</option>
+                  <option value="DD-MM-YYYY">DD-MM-YYYY</option>
+                  <option value="YYYY-MM-DD">YYYY-MM-DD</option>
+                  <option value="MM/DD/YYYY">MM/DD/YYYY</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label>{t('accounts.importAmountSemantics')}</Label>
+                <select
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                  value={amountSemantics}
+                  onChange={(e) => setAmountSemantics(e.target.value)}
+                >
+                  <option value="">{t('accounts.importAmountSemanticsNone')}</option>
+                  <option value="expenses_positive">{t('accounts.importAmountSemanticsExpensesPositive')}</option>
+                  <option value="signed">{t('accounts.importAmountSemanticsSigned')}</option>
+                </select>
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={flipAmount}
+                onChange={(e) => setFlipAmount(e.target.checked)}
+              />
+              {t('accounts.importFlipAmount')}
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label>{t('accounts.importMapDate')}</Label>
+                <Input value={mapDate} onChange={(e) => setMapDate(e.target.value)} placeholder="Data" />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('accounts.importMapDescription')}</Label>
+                <Input value={mapDescription} onChange={(e) => setMapDescription(e.target.value)} placeholder="Descrição" />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('accounts.importMapAmount')}</Label>
+                <Input value={mapAmount} onChange={(e) => setMapAmount(e.target.value)} placeholder="Valor" />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('accounts.importMapNotes')}</Label>
+                <Input value={mapNotes} onChange={(e) => setMapNotes(e.target.value)} placeholder="Parcela" />
+              </div>
+            </div>
+          </div>
+
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               {t('common.cancel')}

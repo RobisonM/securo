@@ -450,6 +450,7 @@ export const accounts = {
     credit_limit?: number | null
     statement_close_day?: number | null
     payment_due_day?: number | null
+    import_profile?: Account['import_profile']
   }): Promise<Account> => {
     const { data } = await api.post('/accounts', account)
     return data
@@ -651,6 +652,9 @@ export const transactions = {
     inflow_column?: string
     outflow_column?: string
     column_mapping?: Record<string, string>
+    header_row?: number
+    delimiter?: string
+    account_id?: string
   }): Promise<ImportPreviewResponse> => {
     const formData = new FormData()
     formData.append('file', file)
@@ -661,6 +665,11 @@ export const transactions = {
     if (options?.column_mapping && Object.keys(options.column_mapping).length > 0) {
       formData.append('column_mapping', JSON.stringify(options.column_mapping))
     }
+    if (options?.header_row != null && options.header_row > 0) {
+      formData.append('header_row', String(options.header_row))
+    }
+    if (options?.delimiter) formData.append('delimiter', options.delimiter)
+    if (options?.account_id) formData.append('account_id', options.account_id)
     const { data } = await api.post('/transactions/import/preview', formData)
     return data
   },

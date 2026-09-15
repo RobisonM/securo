@@ -1,0 +1,26 @@
+ Associado ;Exemplo Titular;;;;;
+ Cooperativa ;0001;;;;;
+ Conta Corrente ;12345-6;;;;;
+ Cartão Mastercard Black;;;;;;
+ 5122.67XX.XXXX.0001;;;;;;
+;;;;;;
+ Data de Vencimento ;10/09/2026;;;;;
+ Valor Total (R$) ;R$ 450,00;;;;;
+ Pagamento Mínimo (R$) ;R$ 50,00;;;;;
+ Situação ;Fechada;;;;;
+;;;;;;
+ Resumo de Despesas ;;;;;;
+ Total da fatura anterior (R$) ;R$ 400,00;;;;;
+ (-) Pagamentos / Creditos (R$) ;-R$ 400,00;;;;;
+ (+) Encargos (R$) ;R$ 0,00;;;;;
+ (+) Despesas / Debitos no Brasil (R$) ;R$ 430,00;;;;;
+ (+) Despesas / Debitos no exterior (R$) ;R$ 20,00;;;;;
+ (=) Total desta fatura (R$) ;R$ 450,00;;;;;
+;;;;;;
+ Data ; Descrição ; Parcela ; Valor ; Valor em Dólar ; Adicional ; Nome
+26/08/2026;SUPERMERCADO EXEMPLO;;R$ 98,42;;;Exemplo Titular
+25/08/2026;NETFLIX COM;;R$ 55,90;;0001;Exemplo Titular
+20/08/2026;LOJA PARCELADA;(01/03);R$ 100,00;;;Exemplo Titular
+15/08/2026;IOF Compra Internacional;;R$ 3,82;;0001;Exemplo Titular
+10/08/2026;Pag Fat Deb Cc;;-R$ 400,00;;;Exemplo Titular
+01/08/2026;Credito Anuidade Cartao;;-R$ 50,00;;;Exemplo Titular

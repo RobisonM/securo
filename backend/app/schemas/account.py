@@ -1,9 +1,22 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class AccountImportProfile(BaseModel):
+    """Saved CSV import layout for an account (e.g. Sicredi fatura with summary)."""
+
+    header_row: Optional[int] = Field(default=None, ge=1, description="1-based CSV header line")
+    delimiter: Optional[str] = Field(default=None, max_length=4)
+    date_format: Optional[str] = None
+    amount_semantics: Optional[
+        Literal["signed", "expenses_positive", "expenses_negative"]
+    ] = None
+    flip_amount: bool = False
+    column_mapping: Optional[dict[str, str]] = None
 
 
 class AccountBase(BaseModel):
@@ -25,6 +38,7 @@ class AccountCreate(BaseModel):
     minimum_payment: Optional[Decimal] = None
     card_brand: Optional[str] = None
     card_level: Optional[str] = None
+    import_profile: Optional[AccountImportProfile] = None
 
 
 class AccountUpdate(BaseModel):
@@ -39,6 +53,8 @@ class AccountUpdate(BaseModel):
     minimum_payment: Optional[Decimal] = None
     card_brand: Optional[str] = None
     card_level: Optional[str] = None
+    # Explicit null clears a previously saved profile.
+    import_profile: Optional[AccountImportProfile] = None
 
 
 class AccountRead(AccountBase):
@@ -69,6 +85,7 @@ class AccountRead(AccountBase):
     card_level: Optional[str] = None
     is_closed: bool = False
     closed_at: Optional[datetime] = None
+    import_profile: Optional[AccountImportProfile] = None
 
     model_config = ConfigDict(from_attributes=True)
 

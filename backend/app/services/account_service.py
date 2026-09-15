@@ -196,6 +196,7 @@ def serialize_account(
         "available_credit": None,
         "next_close_date": None,
         "next_due_date": None,
+        "import_profile": acc.import_profile,
     }
 
     if acc.type == "credit_card":
@@ -272,6 +273,11 @@ async def create_account(
         minimum_payment=data.minimum_payment if is_cc else None,
         card_brand=data.card_brand if is_cc else None,
         card_level=data.card_level if is_cc else None,
+        import_profile=(
+            data.import_profile.model_dump(exclude_none=True)
+            if data.import_profile is not None
+            else None
+        ),
     )
     session.add(account)
     await session.flush()  # get account.id without committing
@@ -306,6 +312,13 @@ async def update_account(
 
     update_data = data.model_dump(exclude_unset=True)
     balance_date = update_data.pop("balance_date", None)
+    if "import_profile" in update_data and update_data["import_profile"] is not None:
+        # Nested dump leaves empty mapping as {}; keep only useful keys.
+        profile = update_data["import_profile"]
+        if isinstance(profile, dict):
+            update_data["import_profile"] = {
+                k: v for k, v in profile.items() if v is not None and v != {} and v != ""
+            } or None
 
     # Track whether we need to recompute effective_date for all transactions.
     # Changes to the CC cycle days shift which bill each historical purchase
@@ -331,13 +344,14 @@ async def update_account(
             "minimum_payment",
             "card_brand",
             "card_level",
+            "import_profile",
         }
         disallowed = set(update_data.keys()) - editable_fields
         if disallowed:
             raise ValueError("Cannot edit bank-connected accounts")
         old_type = account.type
         new_type = update_data.get("type", account.type)
-        cc_fields = editable_fields - {"display_name", "type"}
+        cc_fields = editable_fields - {"display_name", "type", "import_profile"}
         cc_update = {k: v for k, v in update_data.items() if k in cc_fields}
         if cc_update and new_type != "credit_card":
             raise ValueError("Credit card fields can only be set on credit card accounts")

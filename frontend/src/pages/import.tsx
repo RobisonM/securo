@@ -82,6 +82,8 @@ function TransactionImportPanel() {
   const [csvInflowColumn, setCsvInflowColumn] = useState('')
   const [csvOutflowColumn, setCsvOutflowColumn] = useState('')
   const [csvColumnMapping, setCsvColumnMapping] = useState<Record<string, string>>({})
+  const [csvHeaderRow, setCsvHeaderRow] = useState('')
+  const [csvDelimiter, setCsvDelimiter] = useState('')
 
   const { data: accountsList } = useQuery({
     queryKey: ['accounts'],
@@ -98,8 +100,82 @@ function TransactionImportPanel() {
     queryFn: categoryGroupsApi.list,
   })
 
+  function applyAccountProfileToState(accountId: string) {
+    const account = accountsList?.find((a) => a.id === accountId)
+    const profile = account?.import_profile
+    if (!profile) return null
+    const mapping = profile.column_mapping ?? {}
+    setCsvDateFormat(profile.date_format ?? '')
+    setCsvFlipAmount(!!profile.flip_amount)
+    setCsvColumnMapping(mapping)
+    setCsvHeaderRow(profile.header_row != null ? String(profile.header_row) : '')
+    setCsvDelimiter(profile.delimiter ?? '')
+    if (profile.amount_semantics === 'signed' || profile.amount_semantics === 'expenses_positive') {
+      setCcAmountSemantics(profile.amount_semantics)
+    }
+    return profile
+  }
+
+  function buildPreviewOptions(overrides?: {
+    date_format?: string
+    flip_amount?: boolean
+    split?: boolean
+    inflow?: string
+    outflow?: string
+    mapping?: Record<string, string>
+    header_row?: string
+    delimiter?: string
+    account_id?: string
+  }) {
+    const dateFormat = overrides?.date_format ?? csvDateFormat
+    const flip = overrides?.flip_amount ?? csvFlipAmount
+    const split = overrides?.split ?? csvSplitColumns
+    const inflow = overrides?.inflow ?? csvInflowColumn
+    const outflow = overrides?.outflow ?? csvOutflowColumn
+    const mapping = overrides?.mapping ?? csvColumnMapping
+    const headerRowStr = overrides?.header_row ?? csvHeaderRow
+    const delimiter = overrides?.delimiter ?? csvDelimiter
+    const accountId = overrides?.account_id ?? selectedAccount
+
+    const options: {
+      date_format?: string
+      flip_amount?: boolean
+      inflow_column?: string
+      outflow_column?: string
+      column_mapping?: Record<string, string>
+      header_row?: number
+      delimiter?: string
+      account_id?: string
+    } = {}
+    if (dateFormat) options.date_format = dateFormat
+    if (flip) options.flip_amount = true
+    if (split && inflow && outflow) {
+      options.inflow_column = inflow
+      options.outflow_column = outflow
+    }
+    const cleanMapping = Object.fromEntries(Object.entries(mapping).filter(([, v]) => v))
+    if (Object.keys(cleanMapping).length > 0) options.column_mapping = cleanMapping
+    const headerRow = headerRowStr.trim() ? parseInt(headerRowStr, 10) : NaN
+    if (Number.isFinite(headerRow) && headerRow >= 1) options.header_row = headerRow
+    if (delimiter) options.delimiter = delimiter
+    if (accountId) options.account_id = accountId
+    return options
+  }
+
   const previewMutation = useMutation({
-    mutationFn: ({ file, options }: { file: File; options?: { date_format?: string; flip_amount?: boolean; inflow_column?: string; outflow_column?: string; column_mapping?: Record<string, string> } }) =>
+    mutationFn: ({ file, options }: {
+      file: File
+      options?: {
+        date_format?: string
+        flip_amount?: boolean
+        inflow_column?: string
+        outflow_column?: string
+        column_mapping?: Record<string, string>
+        header_row?: number
+        delimiter?: string
+        account_id?: string
+      }
+    }) =>
       transactionsApi.previewImport(file, options),
     onSuccess: (data) => {
       setPreviewData(data)
@@ -140,8 +216,9 @@ function TransactionImportPanel() {
       const included = reviewTransactions.filter((t) => !t.excluded)
       const allCredits =
         included.length > 0 && included.every((t) => t.type === 'credit')
+      const profileSemantics = account?.import_profile?.amount_semantics
       const needsCcSemantics =
-        account?.type === 'credit_card' && allCredits
+        account?.type === 'credit_card' && allCredits && !profileSemantics
       if (needsCcSemantics && !ccAmountSemantics) {
         throw new Error(t('import.ccAmountSemanticsRequired'))
       }
@@ -155,7 +232,9 @@ function TransactionImportPanel() {
           import_mac: previewData?.import_mac ?? undefined,
           ...(needsCcSemantics && ccAmountSemantics
             ? { amount_semantics: ccAmountSemantics }
-            : {}),
+            : profileSemantics
+              ? { amount_semantics: profileSemantics }
+              : {}),
         },
       )
     },
@@ -197,15 +276,26 @@ function TransactionImportPanel() {
     setCsvOutflowColumn('')
     setCsvColumnMapping({})
     setCsvHeaders([])
+    setCsvHeaderRow('')
+    setCsvDelimiter('')
   }
 
   function processFile(file: File) {
     setFileName(file.name)
     setCurrentFile(file)
     resetCsvOptions()
-    // CSV headers come back from the preview response (csv_columns), which
-    // parses the file server-side and handles any delimiter/quoting.
-    previewMutation.mutate({ file })
+    const profile = selectedAccount ? applyAccountProfileToState(selectedAccount) : null
+    previewMutation.mutate({
+      file,
+      options: buildPreviewOptions({
+        account_id: selectedAccount || undefined,
+        date_format: profile?.date_format ?? '',
+        flip_amount: !!profile?.flip_amount,
+        mapping: profile?.column_mapping ?? {},
+        header_row: profile?.header_row != null ? String(profile.header_row) : '',
+        delimiter: profile?.delimiter ?? '',
+      }),
+    })
   }
 
   // Re-run the preview with the current CSV options. Accepts overrides so a
@@ -218,27 +308,14 @@ function TransactionImportPanel() {
     inflow?: string
     outflow?: string
     mapping?: Record<string, string>
+    header_row?: string
+    delimiter?: string
+    account_id?: string
   }) => {
     if (!currentFile) return
-    const dateFormat = overrides?.date_format ?? csvDateFormat
-    const flip = overrides?.flip_amount ?? csvFlipAmount
-    const split = overrides?.split ?? csvSplitColumns
-    const inflow = overrides?.inflow ?? csvInflowColumn
-    const outflow = overrides?.outflow ?? csvOutflowColumn
-    const mapping = overrides?.mapping ?? csvColumnMapping
-
-    const options: { date_format?: string; flip_amount?: boolean; inflow_column?: string; outflow_column?: string; column_mapping?: Record<string, string> } = {}
-    if (dateFormat) options.date_format = dateFormat
-    if (flip) options.flip_amount = true
-    if (split && inflow && outflow) {
-      options.inflow_column = inflow
-      options.outflow_column = outflow
-    }
-    const cleanMapping = Object.fromEntries(Object.entries(mapping).filter(([, v]) => v))
-    if (Object.keys(cleanMapping).length > 0) options.column_mapping = cleanMapping
-    previewMutation.mutate({ file: currentFile, options })
+    previewMutation.mutate({ file: currentFile, options: buildPreviewOptions(overrides) })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentFile, csvDateFormat, csvFlipAmount, csvSplitColumns, csvInflowColumn, csvOutflowColumn, csvColumnMapping])
+  }, [currentFile, csvDateFormat, csvFlipAmount, csvSplitColumns, csvInflowColumn, csvOutflowColumn, csvColumnMapping, csvHeaderRow, csvDelimiter, selectedAccount])
 
   const handleMappingChange = useCallback((field: string, column: string) => {
     setCsvColumnMapping(prev => {
@@ -247,6 +324,28 @@ function TransactionImportPanel() {
       return next
     })
   }, [rePreview])
+
+  const handleAccountChange = (accountId: string) => {
+    setSelectedAccount(accountId)
+    if (!currentFile) return
+    if (!accountId) {
+      rePreview({ account_id: '' })
+      return
+    }
+    const profile = applyAccountProfileToState(accountId)
+    if (profile) {
+      rePreview({
+        account_id: accountId,
+        date_format: profile.date_format ?? '',
+        flip_amount: !!profile.flip_amount,
+        mapping: profile.column_mapping ?? {},
+        header_row: profile.header_row != null ? String(profile.header_row) : '',
+        delimiter: profile.delimiter ?? '',
+      })
+    } else {
+      rePreview({ account_id: accountId })
+    }
+  }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -297,7 +396,10 @@ function TransactionImportPanel() {
     includedCount > 0 &&
     reviewTransactions.filter((t) => !t.excluded).every((t) => t.type === 'credit')
   const needsCcAmountSemantics =
-    selectedAccountObj?.type === 'credit_card' && includedAllCredits
+    selectedAccountObj?.type === 'credit_card' &&
+    includedAllCredits &&
+    !selectedAccountObj?.import_profile?.amount_semantics &&
+    !selectedAccountObj?.import_profile?.flip_amount
 
   return (
     <div className="space-y-6">
@@ -404,13 +506,18 @@ function TransactionImportPanel() {
               <select
                 className="flex-1 border border-border rounded-md px-3 py-2 text-sm bg-card focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
                 value={selectedAccount}
-                onChange={(e) => setSelectedAccount(e.target.value)}
+                onChange={(e) => handleAccountChange(e.target.value)}
               >
                 <option value="">{t('import.selectAccount')}</option>
                 {sortAccountsByDisplayName(accountsList ?? []).map((acc) => (
                   <option key={acc.id} value={acc.id}>{getAccountName(acc)} ({t(TYPE_LABELS[acc.type] || acc.type)})</option>
                 ))}
               </select>
+              {selectedAccountObj?.import_profile && (
+                <p className="text-xs text-muted-foreground sm:ml-0">
+                  {t('import.usingAccountProfile')}
+                </p>
+              )}
               {!selectedAccount && (
                 <div className="flex items-center gap-1.5 text-xs text-amber-600 bg-amber-50 border border-amber-100 px-2.5 py-1.5 rounded-lg shrink-0">
                   <AlertCircle size={12} />

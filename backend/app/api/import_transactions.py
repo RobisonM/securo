@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -19,6 +20,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/transactions", tags=["import"])
 
 
+def _parse_column_mapping(column_mapping: Optional[str]) -> Optional[dict]:
+    if not column_mapping:
+        return None
+    try:
+        parsed_mapping = json.loads(column_mapping)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid column_mapping: must be a JSON object",
+        )
+    if not isinstance(parsed_mapping, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid column_mapping: must be a JSON object",
+        )
+    return parsed_mapping
+
+
 @router.post("/import/preview", response_model=TransactionImportPreview)
 async def preview_import(
     file: UploadFile = File(...),
@@ -27,6 +46,10 @@ async def preview_import(
     inflow_column: Optional[str] = Form(None),
     outflow_column: Optional[str] = Form(None),
     column_mapping: Optional[str] = Form(None),
+    header_row: Optional[int] = Form(None),
+    delimiter: Optional[str] = Form(None),
+    # When set, apply the account's saved import_profile (request overrides win).
+    account_id: Optional[uuid.UUID] = Form(None),
     # Read-gated on purpose, and the exception is deliberate rather than an
     # oversight. This is a POST because it takes a file upload, not because
     # it changes anything: it parses the upload and returns what *would* be
@@ -46,21 +69,25 @@ async def preview_import(
         filename, len(content), file.content_type,
     )
 
-    # column_mapping arrives as a JSON-encoded form field (Securo field -> CSV header)
-    parsed_mapping: Optional[dict] = None
-    if column_mapping:
-        try:
-            parsed_mapping = json.loads(column_mapping)
-        except json.JSONDecodeError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid column_mapping: must be a JSON object",
-            )
-        if not isinstance(parsed_mapping, dict):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid column_mapping: must be a JSON object",
-            )
+    parsed_mapping = _parse_column_mapping(column_mapping)
+
+    profile: dict | None = None
+    if account_id is not None:
+        account = await account_service.get_account(session, account_id, ctx.workspace.id)
+        if not account:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+        profile = account.import_profile if isinstance(account.import_profile, dict) else None
+
+    options = import_service.merge_import_profile(
+        profile,
+        date_format=date_format,
+        flip_amount=flip_amount,
+        inflow_column=inflow_column,
+        outflow_column=outflow_column,
+        column_mapping=parsed_mapping,
+        header_row=header_row,
+        delimiter=delimiter,
+    )
 
     parse_error: Optional[str] = None
     failed_rows = []
@@ -69,7 +96,9 @@ async def preview_import(
             transactions = import_service.parse_ofx(content)
             detected_format = "ofx"
         elif filename.lower().endswith('.qif'):
-            transactions = import_service.parse_qif(content, date_format=date_format)
+            transactions = import_service.parse_qif(
+                content, date_format=options["date_format"]
+            )
             detected_format = "qif"
         elif filename.lower().endswith('.xml') or filename.lower().endswith('.camt'):
             transactions = import_service.parse_camt(content)
@@ -79,17 +108,23 @@ async def preview_import(
             try:
                 transactions, failed_rows = import_service.parse_csv(
                     content,
-                    date_format=date_format,
-                    flip_amount=flip_amount,
-                    inflow_column=inflow_column,
-                    outflow_column=outflow_column,
-                    column_mapping=parsed_mapping,
+                    date_format=options["date_format"],
+                    flip_amount=options["flip_amount"],
+                    inflow_column=options["inflow_column"],
+                    outflow_column=options["outflow_column"],
+                    column_mapping=options["column_mapping"],
+                    header_row=options["header_row"],
+                    delimiter=options["delimiter"],
                 )
             except ValueError as csv_err:
                 # The CSV's columns couldn't be auto-mapped. As long as we can
                 # still read its headers, return a soft failure so the UI can
                 # show the column-mapping dropdowns instead of a hard error.
-                if not import_service.detect_csv_columns(content):
+                if not import_service.detect_csv_columns(
+                    content,
+                    header_row=options["header_row"],
+                    delimiter=options["delimiter"],
+                ):
                     raise
                 transactions = []
                 parse_error = str(csv_err)
@@ -100,14 +135,25 @@ async def preview_import(
                 detected_format = "ofx"
             except Exception:
                 try:
-                    transactions = import_service.parse_qif(content, date_format=date_format)
+                    transactions = import_service.parse_qif(
+                        content, date_format=options["date_format"]
+                    )
                     detected_format = "qif"
                 except Exception:
                     try:
                         transactions = import_service.parse_camt(content)
                         detected_format = "camt"
                     except Exception:
-                        transactions, failed_rows = import_service.parse_csv(content)
+                        transactions, failed_rows = import_service.parse_csv(
+                            content,
+                            date_format=options["date_format"],
+                            flip_amount=options["flip_amount"],
+                            inflow_column=options["inflow_column"],
+                            outflow_column=options["outflow_column"],
+                            column_mapping=options["column_mapping"],
+                            header_row=options["header_row"],
+                            delimiter=options["delimiter"],
+                        )
                         detected_format = "csv"
     except Exception as e:
         logger.error(
@@ -135,7 +181,11 @@ async def preview_import(
     csv_columns: list[str] = []
     if detected_format == "csv":
         try:
-            csv_columns = import_service.detect_csv_columns(content)
+            csv_columns = import_service.detect_csv_columns(
+                content,
+                header_row=options["header_row"],
+                delimiter=options["delimiter"],
+            )
         except Exception:
             csv_columns = []
 
@@ -171,12 +221,15 @@ async def import_transactions(
             ),
         )
 
+    profile = account.import_profile if isinstance(account.import_profile, dict) else None
+    amount_semantics = data.amount_semantics or (profile or {}).get("amount_semantics")
+
     try:
         imported, skipped, excluded, import_log_id = await import_service.import_transactions(
             session, ctx.workspace.id, ctx.user_id, data.account_id, data.transactions, "import",
             filename=data.filename, detected_format=data.detected_format,
             detect_duplicates=data.detect_duplicates,
-            amount_semantics=data.amount_semantics,
+            amount_semantics=amount_semantics,
         )
     except import_service.CreditCardAmountSemanticsError as exc:
         raise HTTPException(

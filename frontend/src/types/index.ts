@@ -145,6 +145,15 @@ export interface ConnectionSettings {
   sync_assets?: boolean
 }
 
+export interface AccountImportProfile {
+  header_row?: number | null
+  delimiter?: string | null
+  date_format?: string | null
+  amount_semantics?: 'signed' | 'expenses_positive' | 'expenses_negative' | null
+  flip_amount?: boolean
+  column_mapping?: Record<string, string> | null
+}
+
 export interface Account {
   id: string
   user_id: string
@@ -176,6 +185,7 @@ export interface Account {
   card_level: string | null
   is_closed: boolean
   closed_at: string | null
+  import_profile: AccountImportProfile | null
 }
 
 export interface CreditCardBill {

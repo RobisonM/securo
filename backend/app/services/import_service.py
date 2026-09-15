@@ -532,22 +532,53 @@ CSV_MAPPABLE_FIELDS = (
 )
 
 
-def _sniff_csv_dialect(text: str):
-    """Detect the CSV dialect (delimiter/quoting), falling back to comma."""
+def _sniff_csv_dialect(text: str, delimiter: str | None = None):
+    """Detect the CSV dialect (delimiter/quoting), falling back to comma.
+
+    An explicit delimiter wins over sniffing — bank exports with a summary
+    preamble often confuse csv.Sniffer.
+    """
+    if delimiter:
+        class _Fixed(csv.excel):
+            pass
+        _Fixed.delimiter = delimiter[0]
+        return _Fixed
     try:
         return csv.Sniffer().sniff(text[:4096], delimiters=',;\t|')
     except csv.Error:
         return csv.excel
 
 
-def detect_csv_columns(content: bytes) -> list[str]:
+def slice_csv_text_at_header_row(text: str, header_row: int | None) -> str:
+    """Drop preamble lines so DictReader sees the real header first.
+
+    ``header_row`` is 1-based (line 1 = first line of the file). Used for
+    Brazilian credit-card statements that put a bill summary above the table.
+    """
+    if header_row is None or header_row <= 1:
+        return text
+    # Keep line endings intact for the remaining content; splitlines() drops them.
+    lines = text.splitlines(keepends=True)
+    if header_row > len(lines):
+        raise ValueError(
+            f"header_row {header_row} is past the end of the file ({len(lines)} lines)"
+        )
+    return "".join(lines[header_row - 1 :])
+
+
+def detect_csv_columns(
+    content: bytes,
+    *,
+    header_row: int | None = None,
+    delimiter: str | None = None,
+) -> list[str]:
     """Return the CSV header column names exactly as they appear in the file.
 
     Used by the import preview so the UI can offer accurate column-mapping
     dropdowns instead of guessing headers client-side.
     """
-    text = decode_csv_text(content)
-    dialect = _sniff_csv_dialect(text)
+    text = slice_csv_text_at_header_row(decode_csv_text(content), header_row)
+    dialect = _sniff_csv_dialect(text, delimiter=delimiter)
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
     return [f.strip() for f in (reader.fieldnames or []) if f and f.strip()]
 
@@ -559,6 +590,8 @@ def parse_csv(
     inflow_column: str | None = None,
     outflow_column: str | None = None,
     column_mapping: dict[str, str] | None = None,
+    header_row: int | None = None,
+    delimiter: str | None = None,
     ) -> tuple[list[TransactionImport], list[FailedRow]]:
     """Parse CSV file content and return transactions.
 
@@ -572,9 +605,11 @@ def parse_csv(
     - inflow_column/outflow_column: use split columns instead of single amount
     - column_mapping: explicit Securo-field -> CSV-header map. Any field
       present here overrides auto-detection; unmapped fields still auto-detect.
+    - header_row: 1-based line number of the header (skips summary preamble)
+    - delimiter: force CSV delimiter (e.g. ';') instead of sniffing
     """
-    text = decode_csv_text(content)
-    dialect = _sniff_csv_dialect(text)
+    text = slice_csv_text_at_header_row(decode_csv_text(content), header_row)
+    dialect = _sniff_csv_dialect(text, delimiter=delimiter)
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
 
     # Normalize field names
@@ -1126,12 +1161,18 @@ def normalize_amount(amount_str: str | None) -> str:
     Example:
         1.442,20 -> 1442.20
         1,442.20 -> 1442.20
+        -R$ 16.647,70 -> -16647.70
     """
     if not amount_str:
         return ""
 
     # Strip currency prefix and Swiss thousands separators (single quote)
     amount_str = str(amount_str).replace('R$', '').replace("'", "").strip()
+    # Sicredi (and similar) emit "-R$ 1.234,56" → after R$ strip: "- 1.234,56"
+    if amount_str.startswith('-'):
+        amount_str = '-' + amount_str[1:].lstrip()
+    elif amount_str.startswith('+'):
+        amount_str = '+' + amount_str[1:].lstrip()
 
     if ',' in amount_str and '.' in amount_str:
         if amount_str.rfind(',') > amount_str.rfind('.'):
@@ -1142,3 +1183,40 @@ def normalize_amount(amount_str: str | None) -> str:
         amount_str = amount_str.replace(',', '.')
 
     return amount_str
+
+
+def merge_import_profile(
+    profile: dict | None,
+    *,
+    date_format: str | None = None,
+    flip_amount: bool = False,
+    inflow_column: str | None = None,
+    outflow_column: str | None = None,
+    column_mapping: dict[str, str] | None = None,
+    header_row: int | None = None,
+    delimiter: str | None = None,
+    amount_semantics: str | None = None,
+) -> dict:
+    """Merge a saved account import_profile with per-request overrides.
+
+    Explicit request values win when provided; profile fills the rest.
+    """
+    profile = profile or {}
+    mapping = column_mapping if column_mapping is not None else profile.get("column_mapping")
+    if mapping is not None and not isinstance(mapping, dict):
+        mapping = None
+
+    resolved_header = header_row if header_row is not None else profile.get("header_row")
+    if resolved_header is not None:
+        resolved_header = int(resolved_header)
+
+    return {
+        "date_format": date_format or profile.get("date_format"),
+        "flip_amount": bool(flip_amount or profile.get("flip_amount")),
+        "inflow_column": inflow_column or profile.get("inflow_column"),
+        "outflow_column": outflow_column or profile.get("outflow_column"),
+        "column_mapping": mapping,
+        "header_row": resolved_header,
+        "delimiter": delimiter or profile.get("delimiter"),
+        "amount_semantics": amount_semantics or profile.get("amount_semantics"),
+    }
