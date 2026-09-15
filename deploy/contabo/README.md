@@ -73,12 +73,43 @@ docker run --rm --network "$(grep CLOUDFLARE_TUNNEL_NETWORK .env | cut -d= -f2)"
 
 1. Zero Trust → Networks → Tunnels → seu tunnel → **Public Hostname**
 2. Edite **`financas.agromei.com.br`**
-3. **Path:** `*` (igual às outras)
-4. **Service / URL:** `http://securo-frontend:8080`  
-   (substitua `http://agromonitor-edge:80`)
-5. Salve
+3. **Type:** HTTP (não HTTPS)
+4. **Path:** `*` (igual às outras)
+5. **Service / URL:** `http://securo-frontend:8080`  
+   (**obrigatório** substituir `http://agromonitor-edge:80`)
+6. Salve e aguarde ~30s
 
 Não é necessário abrir porta no host nem Let’s Encrypt no servidor — o TLS fica na Cloudflare.
+
+## Error 502 — diagnóstico
+
+Na VPS, em `deploy/contabo`:
+
+```bash
+chmod +x diagnose-502.sh
+./diagnose-502.sh
+```
+
+Causas mais comuns:
+
+| Sintoma | Correção |
+|---------|----------|
+| Rota CF ainda em `agromonitor-edge:80` | Mudar para `http://securo-frontend:8080` |
+| `securo-frontend` não existe / Exit | `docker compose logs` + `up -d --build` |
+| Rede errada em `.env` | Mesma rede do `n8n` / `cloudflared` |
+| Container fora da rede do tunnel | Ajustar `CLOUDFLARE_TUNNEL_NETWORK` e `up -d` |
+| curl na rede do tunnel falha | CF sempre 502 até isso passar |
+
+```bash
+# rede do n8n / cloudflared
+docker inspect n8n --format '{{range $k,$v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
+docker inspect cloudflared --format '{{range $k,$v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
+
+# containers securo
+docker compose ps -a
+docker compose logs backend --tail 80
+docker compose logs frontend --tail 40
+```
 
 ```mermaid
 flowchart LR
