@@ -40,7 +40,7 @@ export const COLUMN_REGISTRY: ColumnDef[] = [
   { id: 'account',     labelKey: 'transactions.colAccount',     defaultVisible: true,  sortable: true,  defaultWidth: 160, align: 'left' },
   { id: 'payee',       labelKey: 'transactions.colPayee',       defaultVisible: false, sortable: true,  defaultWidth: 160, align: 'left' },
   { id: 'cardholder',  labelKey: 'transactions.colCardholder',  defaultVisible: true,  sortable: true,  defaultWidth: 140, align: 'left' },
-  { id: 'installment', labelKey: 'transactions.colInstallment', defaultVisible: true,  sortable: false, defaultWidth: 90,  align: 'center' },
+  { id: 'installment', labelKey: 'transactions.colInstallment', defaultVisible: true,  sortable: false, defaultWidth: 90,  align: 'left' },
   { id: 'notes',       labelKey: 'transactions.colNotes',       defaultVisible: false, sortable: false, defaultWidth: 220, align: 'left' },
   { id: 'tags',        labelKey: 'transactions.colTags',        defaultVisible: false, sortable: false, defaultWidth: 180, align: 'left' },
   { id: 'attachments', labelKey: 'transactions.colAttachments', defaultVisible: false, sortable: false, defaultWidth: 70,  align: 'right' },

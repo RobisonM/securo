@@ -658,6 +658,7 @@ export default function AccountDetailPage() {
       installment_purchase_date: null,
       bill_id: null,
       effective_bill_date: null,
+      cardholder: null,
       recurring_transaction_id: p.recurring_id,
       splits: [],
       is_ignored: false,
