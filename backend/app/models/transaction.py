@@ -50,6 +50,9 @@ class Transaction(Base):
     payee: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     payee_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("payees.id", ondelete="SET NULL"), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    # Cardholder name from statement exports (e.g. Sicredi "Nome") when a
+    # single account covers additional cards. Display-only identity — not a Payee.
+    cardholder: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     raw_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     import_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("import_logs.id"), nullable=True)
     transfer_pair_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)

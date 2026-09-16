@@ -230,6 +230,7 @@ async def import_transactions(
             filename=data.filename, detected_format=data.detected_format,
             detect_duplicates=data.detect_duplicates,
             amount_semantics=amount_semantics,
+            bill_payment_date=data.bill_payment_date,
         )
     except import_service.CreditCardAmountSemanticsError as exc:
         raise HTTPException(

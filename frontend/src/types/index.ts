@@ -277,6 +277,8 @@ export interface Transaction {
   // available, cycle math otherwise). Setting it forces the tx into the
   // bill whose due_date matches.
   effective_bill_date: string | null
+  // Cardholder from statement export (additional cards on one account).
+  cardholder: string | null
   // The recurring bill this transaction fulfills, if any (issue #116).
   recurring_transaction_id?: string | null
   splits: TransactionSplit[]
@@ -608,6 +610,9 @@ export interface ImportPreviewTransaction {
   category_id?: string | null
   force_uncategorized?: boolean
   notes?: string | null
+  installment_number?: number | null
+  total_installments?: number | null
+  cardholder?: string | null
 }
 
 export interface ImportPreviewResponse {

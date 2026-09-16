@@ -12,6 +12,7 @@ import { Label } from '@/components/ui/label'
 import type { ImportPreviewTransaction, ImportPreviewResponse, ImportReviewTransaction } from '@/types'
 import { Upload, FileText, X, CheckCircle2, AlertCircle, Settings2, Download, ChevronDown, ChevronRight } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
+import { DatePickerInput } from '@/components/ui/date-picker-input'
 import { PageHeader } from '@/components/page-header'
 import { AssetImportPanel } from '@/components/asset-import-panel'
 import { ImportSummaryBar } from '@/components/import-summary-bar'
@@ -40,6 +41,8 @@ const CSV_MAPPING_FIELDS = [
   { key: 'payee', label: 'import.mapPayee' },
   { key: 'external_id', label: 'import.mapExternalId' },
   { key: 'notes', label: 'import.mapNotes' },
+  { key: 'installment', label: 'import.mapInstallment' },
+  { key: 'cardholder', label: 'import.mapCardholder' },
 ] as const
 
 function toReviewTransactions(txns: ImportPreviewTransaction[]): ImportReviewTransaction[] {
@@ -64,6 +67,7 @@ function TransactionImportPanel() {
   const [reviewTransactions, setReviewTransactions] = useState<ImportReviewTransaction[]>([])
   const [selectedAccount, setSelectedAccount] = useState('')
   const [ccAmountSemantics, setCcAmountSemantics] = useState<'' | 'signed' | 'expenses_positive'>('')
+  const [billPaymentDate, setBillPaymentDate] = useState('')
   const [dragOver, setDragOver] = useState(false)
   const [fileName, setFileName] = useState<string | null>(null)
   const [currentFile, setCurrentFile] = useState<File | null>(null)
@@ -215,6 +219,9 @@ function TransactionImportPanel() {
         notes: rt.notes ?? undefined,
         category_name: rt.category_name ?? undefined,
         excluded: rt.excluded,
+        installment_number: rt.installment_number ?? undefined,
+        total_installments: rt.total_installments ?? undefined,
+        cardholder: rt.cardholder ?? undefined,
         category_id: rt.selected_category_id !== undefined
           ? (rt.selected_category_id ?? undefined)
           : (rt.suggested_category_id ?? undefined),
@@ -230,6 +237,9 @@ function TransactionImportPanel() {
       if (needsCcSemantics && !ccAmountSemantics) {
         throw new Error(t('import.ccAmountSemanticsRequired'))
       }
+      if (account?.type === 'credit_card' && !billPaymentDate) {
+        throw new Error(t('import.billPaymentDateRequired'))
+      }
       return transactionsApi.import(
         selectedAccount,
         txns,
@@ -243,6 +253,9 @@ function TransactionImportPanel() {
             : profileSemantics
               ? { amount_semantics: profileSemantics }
               : {}),
+          ...(account?.type === 'credit_card' && billPaymentDate
+            ? { bill_payment_date: billPaymentDate }
+            : {}),
         },
       )
     },
@@ -260,13 +273,18 @@ function TransactionImportPanel() {
       setReviewTransactions([])
       setSelectedAccount('')
       setCcAmountSemantics('')
+      setBillPaymentDate('')
       setFileName(null)
       setCurrentFile(null)
       resetCsvOptions()
       if (fileInputRef.current) fileInputRef.current.value = ''
     },
     onError: (error: unknown) => {
-      if (error instanceof Error && error.message === t('import.ccAmountSemanticsRequired')) {
+      if (
+        error instanceof Error &&
+        (error.message === t('import.ccAmountSemanticsRequired') ||
+          error.message === t('import.billPaymentDateRequired'))
+      ) {
         toast.error(error.message)
         return
       }
@@ -380,6 +398,7 @@ function TransactionImportPanel() {
     setCurrentFile(null)
     setSelectedAccount('')
     setCcAmountSemantics('')
+    setBillPaymentDate('')
     resetCsvOptions()
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
@@ -551,6 +570,21 @@ function TransactionImportPanel() {
                 </div>
               )}
             </div>
+            {selectedAccountObj?.type === 'credit_card' && (
+              <div className="mt-3 space-y-2">
+                <Label className="text-xs text-muted-foreground mb-1 block">
+                  {t('import.billPaymentDate')}
+                </Label>
+                <DatePickerInput
+                  value={billPaymentDate}
+                  onChange={setBillPaymentDate}
+                  className="w-full sm:max-w-xs justify-start"
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t('import.billPaymentDateHint')}
+                </p>
+              </div>
+            )}
             {needsCcAmountSemantics && (
               <div className="mt-3 flex flex-col gap-2">
                 <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-3 py-2 rounded-lg">
@@ -787,6 +821,7 @@ function TransactionImportPanel() {
                 || importMutation.isPending
                 || includedCount === 0
                 || (needsCcAmountSemantics && !ccAmountSemantics)
+                || (selectedAccountObj?.type === 'credit_card' && !billPaymentDate)
               }
               className="gap-2"
             >

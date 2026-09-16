@@ -31,7 +31,8 @@ SICREDI_PROFILE = {
         "date": "Data",
         "description": "Descrição",
         "amount": "Valor",
-        "notes": "Parcela",
+        "installment": "Parcela",
+        "cardholder": "Nome",
     },
 }
 
@@ -67,7 +68,10 @@ def test_parse_sicredi_fatura_with_profile():
     assert rows[0].description == "SUPERMERCADO EXEMPLO"
     assert rows[0].amount == Decimal("98.42")
     assert rows[0].type == "debit"
-    assert rows[2].notes == "(01/03)"
+    assert rows[0].cardholder == "Exemplo Titular"
+    assert rows[2].installment_number == 1
+    assert rows[2].total_installments == 3
+    assert rows[2].cardholder == "Exemplo Titular"
     payment = next(r for r in rows if "Pag Fat" in r.description)
     assert payment.amount == Decimal("400.00")
     assert payment.type == "credit"

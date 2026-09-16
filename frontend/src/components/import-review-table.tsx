@@ -152,6 +152,12 @@ export function ImportReviewTable({
               <TableHead className="text-xs font-medium text-muted-foreground py-3">
                 {t('transactions.description')}
               </TableHead>
+              <TableHead className="text-xs font-medium text-muted-foreground py-3 w-[80px] text-center">
+                {t('transactions.colInstallment')}
+              </TableHead>
+              <TableHead className="text-xs font-medium text-muted-foreground py-3 w-[130px]">
+                {t('transactions.colCardholder')}
+              </TableHead>
               <TableHead className="text-xs font-medium text-muted-foreground py-3 text-right w-[120px]">
                 {t('transactions.amount')}
               </TableHead>
@@ -183,6 +189,14 @@ export function ImportReviewTable({
                   </TableCell>
                   <TableCell className={`py-2.5 text-sm ${tx.excluded ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
                     {tx.description}
+                  </TableCell>
+                  <TableCell className="py-2.5 text-xs text-muted-foreground text-center tabular-nums whitespace-nowrap">
+                    {tx.installment_number != null && tx.total_installments != null
+                      ? `${tx.installment_number}/${tx.total_installments}`
+                      : '—'}
+                  </TableCell>
+                  <TableCell className="py-2.5 text-xs text-muted-foreground max-w-[130px] truncate">
+                    {tx.cardholder || '—'}
                   </TableCell>
                   <TableCell className={`py-2.5 text-right text-sm font-bold tabular-nums ${tx.type === 'credit' ? 'text-emerald-600' : 'text-rose-500'}`}>
                     {tx.type === 'credit' ? '+' : '−'}{formatCurrency(Math.abs(Number(tx.amount)), userCurrency, locale)}

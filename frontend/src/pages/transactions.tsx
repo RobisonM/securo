@@ -1410,6 +1410,20 @@ export default function TransactionsPage() {
             {tx.payee_name ?? tx.payee ?? <span className="text-muted-foreground">—</span>}
           </TableCell>
         )
+      case 'cardholder':
+        return (
+          <TableCell key={col.id} style={widthStyle} className={`${baseClass} text-sm text-muted-foreground`}>
+            {tx.cardholder ?? <span className="text-muted-foreground">—</span>}
+          </TableCell>
+        )
+      case 'installment':
+        return (
+          <TableCell key={col.id} style={widthStyle} className={`${baseClass} text-sm text-muted-foreground text-center tabular-nums`}>
+            {tx.installment_number != null && tx.total_installments != null
+              ? `${tx.installment_number}/${tx.total_installments}`
+              : <span className="text-muted-foreground">—</span>}
+          </TableCell>
+        )
       case 'notes': {
         const text = tx.notes ? stripHashtags(tx.notes) : ''
         return (

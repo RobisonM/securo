@@ -679,12 +679,16 @@ function buildImportProfile(opts: {
   mapDescription: string
   mapAmount: string
   mapNotes: string
+  mapInstallment: string
+  mapCardholder: string
 }): AccountImportProfile | null {
   const column_mapping: Record<string, string> = {}
   if (opts.mapDate.trim()) column_mapping.date = opts.mapDate.trim()
   if (opts.mapDescription.trim()) column_mapping.description = opts.mapDescription.trim()
   if (opts.mapAmount.trim()) column_mapping.amount = opts.mapAmount.trim()
   if (opts.mapNotes.trim()) column_mapping.notes = opts.mapNotes.trim()
+  if (opts.mapInstallment.trim()) column_mapping.installment = opts.mapInstallment.trim()
+  if (opts.mapCardholder.trim()) column_mapping.cardholder = opts.mapCardholder.trim()
 
   const header_row = opts.headerRow.trim() ? parseInt(opts.headerRow, 10) : null
   const profile: AccountImportProfile = {
@@ -709,7 +713,8 @@ const SICREDI_FATURA_PRESET: AccountImportProfile = {
     date: 'Data',
     description: 'Descrição',
     amount: 'Valor',
-    notes: 'Parcela',
+    installment: 'Parcela',
+    cardholder: 'Nome',
   },
 }
 
@@ -765,6 +770,8 @@ function AccountDialog({
   const [mapDescription, setMapDescription] = useState(profile?.column_mapping?.description ?? '')
   const [mapAmount, setMapAmount] = useState(profile?.column_mapping?.amount ?? '')
   const [mapNotes, setMapNotes] = useState(profile?.column_mapping?.notes ?? '')
+  const [mapInstallment, setMapInstallment] = useState(profile?.column_mapping?.installment ?? '')
+  const [mapCardholder, setMapCardholder] = useState(profile?.column_mapping?.cardholder ?? '')
 
   const [formSource, setFormSource] = useState<{ account: typeof account } | null>(null)
   if (!formSource || formSource.account !== account) {
@@ -788,6 +795,8 @@ function AccountDialog({
     setMapDescription(p?.column_mapping?.description ?? '')
     setMapAmount(p?.column_mapping?.amount ?? '')
     setMapNotes(p?.column_mapping?.notes ?? '')
+    setMapInstallment(p?.column_mapping?.installment ?? '')
+    setMapCardholder(p?.column_mapping?.cardholder ?? '')
   }
 
   function applySicrediPreset() {
@@ -801,6 +810,8 @@ function AccountDialog({
     setMapDescription(p.column_mapping?.description ?? '')
     setMapAmount(p.column_mapping?.amount ?? '')
     setMapNotes(p.column_mapping?.notes ?? '')
+    setMapInstallment(p.column_mapping?.installment ?? '')
+    setMapCardholder(p.column_mapping?.cardholder ?? '')
   }
 
   return (
@@ -840,6 +851,8 @@ function AccountDialog({
                 mapDescription,
                 mapAmount,
                 mapNotes,
+                mapInstallment,
+                mapCardholder,
               }),
             })
           }}
@@ -1057,8 +1070,16 @@ function AccountDialog({
                 <Input value={mapAmount} onChange={(e) => setMapAmount(e.target.value)} placeholder="Valor" />
               </div>
               <div className="space-y-2">
+                <Label>{t('accounts.importMapInstallment')}</Label>
+                <Input value={mapInstallment} onChange={(e) => setMapInstallment(e.target.value)} placeholder="Parcela" />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('accounts.importMapCardholder')}</Label>
+                <Input value={mapCardholder} onChange={(e) => setMapCardholder(e.target.value)} placeholder="Nome" />
+              </div>
+              <div className="space-y-2">
                 <Label>{t('accounts.importMapNotes')}</Label>
-                <Input value={mapNotes} onChange={(e) => setMapNotes(e.target.value)} placeholder="Parcela" />
+                <Input value={mapNotes} onChange={(e) => setMapNotes(e.target.value)} placeholder="Observação" />
               </div>
             </div>
           </div>

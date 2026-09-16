@@ -682,6 +682,7 @@ export const transactions = {
       detect_duplicates?: boolean
       import_mac?: string | null
       amount_semantics?: 'signed' | 'expenses_positive' | 'expenses_negative'
+      bill_payment_date?: string
     },
   ): Promise<{ imported: number; skipped: number; excluded: number; import_log_id: string }> => {
     const payload: {
@@ -692,6 +693,7 @@ export const transactions = {
       detect_duplicates?: boolean
       import_mac?: string
       amount_semantics?: 'signed' | 'expenses_positive' | 'expenses_negative'
+      bill_payment_date?: string
     } = { account_id, transactions, filename, detected_format }
 
     if (typeof options?.detect_duplicates === 'boolean') {
@@ -702,6 +704,9 @@ export const transactions = {
     }
     if (options?.amount_semantics) {
       payload.amount_semantics = options.amount_semantics
+    }
+    if (options?.bill_payment_date) {
+      payload.bill_payment_date = options.bill_payment_date
     }
 
     const { data } = await api.post('/transactions/import', payload)

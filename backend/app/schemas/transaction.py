@@ -219,6 +219,7 @@ class TransactionRead(TransactionBase):
     installment_series_id: Optional[uuid.UUID] = None
     bill_id: Optional[uuid.UUID] = None
     effective_bill_date: Optional[_Date] = None
+    cardholder: Optional[str] = None
     recurring_transaction_id: Optional[uuid.UUID] = None
     splits: list[TransactionSplitRead] = []
     # Shared-transaction view fields. Set per-request when the viewer
@@ -322,6 +323,11 @@ class TransactionImport(TransactionBase):
     category_id: Optional[uuid.UUID] = None
     force_uncategorized: bool = False
     notes: Optional[str] = None
+    # Parsed from statement columns (e.g. Sicredi Parcela / Nome). Optional —
+    # not subject to the manual-series validator on TransactionCreate.
+    installment_number: Optional[int] = Field(default=None, ge=1)
+    total_installments: Optional[int] = Field(default=None, ge=1)
+    cardholder: Optional[str] = None
 
 
 class FailedRow(BaseModel):
@@ -359,3 +365,7 @@ class TransactionImportRequest(BaseModel):
     amount_semantics: Optional[
         Literal["signed", "expenses_positive", "expenses_negative"]
     ] = None
+    # Credit-card statement payment / due date. Stored as effective_bill_date
+    # so dashboard P&L buckets the purchase on bill payment day while `date`
+    # remains the purchase date shown in the ledger.
+    bill_payment_date: Optional[_Date] = None

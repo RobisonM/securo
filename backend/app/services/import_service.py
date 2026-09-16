@@ -8,7 +8,7 @@ import uuid
 import warnings
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from bs4 import XMLParsedAsHTMLWarning
@@ -528,8 +528,23 @@ DATE_FORMAT_MAP = {
 CSV_MAPPABLE_FIELDS = (
     'date', 'description', 'amount', 'type',
     'category', 'currency', 'fx_rate', 'inflow', 'outflow',
-    'payee', 'external_id', 'notes',
+    'payee', 'external_id', 'notes', 'installment', 'cardholder',
 )
+
+_INSTALLMENT_RE = re.compile(r"^\(?\s*(\d+)\s*/\s*(\d+)\s*\)?$")
+
+
+def parse_installment_label(value: str | None) -> tuple[int, int] | None:
+    """Parse ``(01/03)`` / ``1/3`` into (number, total)."""
+    if not value or not str(value).strip():
+        return None
+    match = _INSTALLMENT_RE.match(str(value).strip())
+    if not match:
+        return None
+    number, total = int(match.group(1)), int(match.group(2))
+    if number < 1 or total < 1 or number > total:
+        return None
+    return number, total
 
 
 def _sniff_csv_dialect(text: str, delimiter: str | None = None):
@@ -626,6 +641,8 @@ def parse_csv(
     payee_cols = ['payee', 'merchant', 'beneficiary', 'beneficiario', 'pagador']
     external_id_cols = [] # External ID must be mapped explicitly
     notes_cols = ['notes', 'nota', 'observacao']
+    installment_cols = ['parcela', 'parcelas', 'installment', 'installments']
+    cardholder_cols = ['nome', 'titular', 'cardholder', 'card_holder', 'portador']
 
     # Normalize the user-supplied column mapping (Securo field -> CSV header).
     mapping = {
@@ -679,6 +696,8 @@ def parse_csv(
     payee_col = resolve_col('payee', payee_cols)
     external_id_col = resolve_col('external_id', external_id_cols)
     notes_col = resolve_col('notes', notes_cols)
+    installment_col = resolve_col('installment', installment_cols)
+    cardholder_col = resolve_col('cardholder', cardholder_cols)
 
     if not date_col or not desc_col:
         raise ValueError(
@@ -784,6 +803,20 @@ def parse_csv(
         txn_payee = row[payee_col].strip() if payee_col and row.get(payee_col) else None
         txn_external_id = row[external_id_col].strip() if external_id_col and row.get(external_id_col) else None
         txn_notes = row[notes_col].strip() if notes_col and row.get(notes_col) else None
+        installment_raw = (
+            row[installment_col].strip()
+            if installment_col and row.get(installment_col)
+            else None
+        )
+        installment = parse_installment_label(installment_raw)
+        # If parcela wasn't a structured n/m label, keep the raw text in notes.
+        if installment_raw and installment is None and not txn_notes:
+            txn_notes = installment_raw
+        txn_cardholder = (
+            row[cardholder_col].strip()
+            if cardholder_col and row.get(cardholder_col)
+            else None
+        ) or None
 
         transactions.append(TransactionImport(
             description=row[desc_col].strip(),
@@ -796,6 +829,9 @@ def parse_csv(
             payee_raw=txn_payee,
             external_id=txn_external_id,
             notes=txn_notes,
+            installment_number=installment[0] if installment else None,
+            total_installments=installment[1] if installment else None,
+            cardholder=txn_cardholder,
         ))
 
     assign_import_external_ids(transactions, content)
@@ -986,6 +1022,7 @@ async def import_transactions(
     detected_format: str = "",
     detect_duplicates: bool = True,
     amount_semantics: str | None = None,
+    bill_payment_date: date | None = None,
 ) -> tuple[int, int, int, uuid.UUID]:
     """Import transactions into an account in the given workspace.
 
@@ -1158,8 +1195,24 @@ async def import_transactions(
             payee_id=import_payee_id,
             category_id=category_id,
             notes=getattr(txn_data, "notes", None),
+            installment_number=getattr(txn_data, "installment_number", None),
+            total_installments=getattr(txn_data, "total_installments", None),
+            cardholder=(getattr(txn_data, "cardholder", None) or None),
+            effective_bill_date=(
+                bill_payment_date
+                if account_type == "credit_card" and bill_payment_date is not None
+                else None
+            ),
         )
-        apply_effective_date(incoming, account)
+        apply_effective_date(
+            incoming,
+            account,
+            bill_due_date=(
+                bill_payment_date
+                if account_type == "credit_card" and bill_payment_date is not None
+                else None
+            ),
+        )
         preview = await preview_rules_for_transaction(
             session,
             user_id,
