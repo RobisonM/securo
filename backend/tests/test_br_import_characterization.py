@@ -439,6 +439,10 @@ async def test_refund_persists_and_is_not_transfer(
     txs = list(result.scalars().all())
     assert {t.type for t in txs} == {"debit", "credit"}
     assert all(t.transfer_pair_id is None for t in txs)
+    credit = next(t for t in txs if t.type == "credit")
+    debit = next(t for t in txs if t.type == "debit")
+    assert credit.exclude_from_pnl is True
+    assert debit.exclude_from_pnl is False
 
 
 @pytest.mark.asyncio

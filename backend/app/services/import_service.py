@@ -133,11 +133,23 @@ def apply_amount_semantics(
     transactions: list[TransactionImport],
     amount_semantics: str | None,
 ) -> None:
-    """Apply explicit amount direction for credit-card CSVs (mutates in place)."""
+    """Apply explicit amount direction for credit-card CSVs (mutates in place).
+
+    ``expenses_positive``: unsigned/positive amounts are purchases (debit).
+    Rows that already arrived as debit (negative CSV amounts — payments,
+    refunds, fee credits) are flipped to credit so they remain bill
+    abatements instead of being treated as extra expenses.
+    """
     if amount_semantics == "expenses_positive":
         for txn in transactions:
-            if not txn.excluded and txn.type == "credit":
-                txn.type = "debit"
+            if txn.excluded:
+                continue
+            txn.type = "debit" if txn.type == "credit" else "credit"
+    elif amount_semantics == "expenses_negative":
+        # Negative amounts are purchases; positive are credits/abatements.
+        # Parser already encodes that (amount>0 → credit, amount<0 → debit),
+        # so no flip is required — kept for explicit client signalling.
+        return
 
 
 class CreditCardAmountSemanticsError(ValueError):
@@ -1178,6 +1190,14 @@ async def import_transactions(
             else user_category_id or suggested_cat_id or csv_category_id
         )
 
+        # Credits on a credit-card ledger are bill abatements (payment,
+        # refund, fee waiver) — they reduce what is owed on the statement
+        # but must not inflate Dashboard income or be booked as expenses.
+        # counts_on_bill still includes them so the fatura total nets correctly.
+        is_cc_abatement = (
+            account_type == "credit_card" and txn_data.type == "credit"
+        )
+
         incoming = Transaction(
             user_id=user_id,
             workspace_id=workspace_id,
@@ -1198,6 +1218,7 @@ async def import_transactions(
             installment_number=getattr(txn_data, "installment_number", None),
             total_installments=getattr(txn_data, "total_installments", None),
             cardholder=(getattr(txn_data, "cardholder", None) or None),
+            exclude_from_pnl=is_cc_abatement,
             effective_bill_date=(
                 bill_payment_date
                 if account_type == "credit_card" and bill_payment_date is not None
@@ -1254,6 +1275,8 @@ async def import_transactions(
             placeholder.notes = merge_notes(placeholder.notes, preview.notes)
             if preview.is_ignored:
                 placeholder.is_ignored = True
+            if is_cc_abatement:
+                placeholder.exclude_from_pnl = True
             imported += 1
             continue
 

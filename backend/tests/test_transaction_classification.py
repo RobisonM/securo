@@ -62,8 +62,22 @@ def test_exclude_from_pnl_is_adjustment():
     )
 
 
-def test_adjustment_beats_paired_transfer():
-    """exclude_from_pnl wins even when a pair exists."""
+def test_paired_beats_exclude_from_pnl_for_card_payment():
+    """Once cash↔card are paired, card_payment wins over the CC abatement flag."""
+    assert (
+        _classify(
+            type="credit",
+            account_type="credit_card",
+            exclude_from_pnl=True,
+            transfer_pair_id=PAIR,
+            counterpart_account_type="checking",
+        )
+        == "card_payment"
+    )
+
+
+def test_paired_cash_transfer_beats_exclude_from_pnl():
+    """Pairing wins; exclude_from_pnl alone no longer overrides a structural pair."""
     assert (
         _classify(
             type="debit",
@@ -71,7 +85,7 @@ def test_adjustment_beats_paired_transfer():
             transfer_pair_id=PAIR,
             counterpart_account_type="savings",
         )
-        == "adjustment"
+        == "transfer"
     )
 
 
@@ -185,13 +199,20 @@ def test_credit_card_purchase_categorized_is_expense():
     )
 
 
-def test_credit_card_refund_categorized_is_income():
-    """Current semantics: a categorized card credit is income (not a dedicated
-    refund type). Pairing / ignore / exclude_from_pnl can still reclassify.
-    """
+def test_credit_card_refund_is_adjustment():
+    """Unpaired card credits are fatura abatements, never personal income."""
     assert (
         _classify(type="credit", account_type="credit_card", category_id=CATEGORY)
-        == "income"
+        == "adjustment"
+    )
+    assert (
+        _classify(
+            type="credit",
+            account_type="credit_card",
+            category_id=None,
+            exclude_from_pnl=True,
+        )
+        == "adjustment"
     )
 
 

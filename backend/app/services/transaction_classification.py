@@ -11,8 +11,9 @@ avoid N+1 queries.
 
 Precedence (first match wins):
 
-1. ``adjustment`` — ``exclude_from_pnl``
-2. ``card_payment`` — paired cash ↔ credit_card
+1. ``card_payment`` — paired cash ↔ credit_card
+2. ``adjustment`` — ``exclude_from_pnl``, or unpaired credit on a credit_card
+   (bill abatement: payment/refund/fee credit — reduces the fatura, not income)
 3. ``transfer`` — other pairs, or category ``treat_as_transfer``
 4. ``uncertain`` — no category (pending categorization)
 5. ``income`` — credit
@@ -91,25 +92,32 @@ def is_card_payment_pair(
 
 def classify_transaction(data: ClassificationInput) -> TransactionClassification:
     """Return the financial meaning of one transaction (pure / deterministic)."""
-    # 1. Balance adjustment kept in the ledger but omitted from P&L.
-    if data.exclude_from_pnl:
-        return "adjustment"
-
-    # 2–3. Structural pairing beats category and uncategorized state.
+    # 1. Structural pairing beats flags, category and uncategorized state.
+    #    Card bill payments must read as card_payment even when the CC leg
+    #    was imported with exclude_from_pnl (abatement until paired).
     if data.transfer_pair_id is not None:
         if is_card_payment_pair(data.account_type, data.counterpart_account_type):
             return "card_payment"
         return "transfer"
 
+    # 2. Balance / bill adjustment kept in the ledger but omitted from P&L.
+    if data.exclude_from_pnl:
+        return "adjustment"
+
+    # Unpaired credit on a credit card is always a fatura abatement
+    # (payment, refund, anuidade credit) — never personal income.
+    if is_card_account_type(data.account_type) and data.type == "credit":
+        return "adjustment"
+
     # Unilateral "flows, not spend" — category flag, no pair required.
     if data.treat_as_transfer:
         return "transfer"
 
-    # 4. Pending categorization (not an error).
+    # 3. Pending categorization (not an error).
     if data.category_id is None:
         return "uncertain"
 
-    # 5–6. Ledger direction once meaning is ordinary income/expense.
+    # 4–5. Ledger direction once meaning is ordinary income/expense.
     if data.type == "credit":
         return "income"
     if data.type == "debit":

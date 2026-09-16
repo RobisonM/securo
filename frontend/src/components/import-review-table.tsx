@@ -1,9 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ImportReviewTransaction, Category, CategoryGroup } from '@/types'
 import { formatCurrency } from '@/lib/format'
 import {
-  Table,
   TableBody,
   TableCell,
   TableHead,
@@ -22,6 +21,62 @@ import {
 } from '@/components/ui/select'
 
 const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+const STORAGE_KEY_WIDTHS = 'securo.import.columns.widths'
+const MIN_COL_WIDTH = 48
+const MAX_COL_WIDTH = 800
+
+type ImportColId =
+  | 'toggle'
+  | 'date'
+  | 'description'
+  | 'installment'
+  | 'cardholder'
+  | 'amount'
+  | 'category'
+  | 'status'
+
+interface ImportColDef {
+  id: ImportColId
+  labelKey?: string
+  defaultWidth: number
+  align?: 'left' | 'right' | 'center'
+  /** Checkbox column — no user-facing label, still resizable. */
+  srOnly?: boolean
+}
+
+const IMPORT_COLUMNS: ImportColDef[] = [
+  { id: 'toggle', defaultWidth: 44, srOnly: true },
+  { id: 'date', labelKey: 'transactions.date', defaultWidth: 100 },
+  { id: 'description', labelKey: 'transactions.description', defaultWidth: 280 },
+  { id: 'installment', labelKey: 'transactions.colInstallment', defaultWidth: 80, align: 'center' },
+  { id: 'cardholder', labelKey: 'transactions.colCardholder', defaultWidth: 130 },
+  { id: 'amount', labelKey: 'transactions.amount', defaultWidth: 120, align: 'right' },
+  { id: 'category', labelKey: 'import.category', defaultWidth: 180 },
+  { id: 'status', labelKey: 'transactions.status', defaultWidth: 90 },
+]
+
+const COL_BY_ID = Object.fromEntries(IMPORT_COLUMNS.map((c) => [c.id, c])) as Record<
+  ImportColId,
+  ImportColDef
+>
+
+function loadWidths(): Partial<Record<ImportColId, number>> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_WIDTHS)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return {}
+    const out: Partial<Record<ImportColId, number>> = {}
+    for (const [k, v] of Object.entries(parsed)) {
+      if (k in COL_BY_ID && typeof v === 'number' && v >= MIN_COL_WIDTH && v <= MAX_COL_WIDTH) {
+        out[k as ImportColId] = v
+      }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
 
 function formatLocalDate(date: string, locale: string) {
   const match = ISO_DATE_RE.exec(date)
@@ -79,17 +134,61 @@ export function ImportReviewTable({
       return 50
     }
   })
+  const [widths, setWidths] = useState<Partial<Record<ImportColId, number>>>(() => loadWidths())
+  const resizingRef = useRef<{ id: ImportColId; startX: number; startWidth: number } | null>(null)
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_WIDTHS, JSON.stringify(widths))
+    } catch {
+      /* quota / disabled */
+    }
+  }, [widths])
+
+  const widthOf = useCallback(
+    (id: ImportColId) => widths[id] ?? COL_BY_ID[id].defaultWidth,
+    [widths],
+  )
+
+  const setWidth = useCallback((id: ImportColId, width: number) => {
+    const clamped = Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.round(width)))
+    setWidths((prev) => ({ ...prev, [id]: clamped }))
+  }, [])
+
+  const startResize = (e: React.PointerEvent<HTMLSpanElement>, id: ImportColId) => {
+    e.preventDefault()
+    e.stopPropagation()
+    resizingRef.current = { id, startX: e.clientX, startWidth: widthOf(id) }
+    const onMove = (ev: PointerEvent) => {
+      const r = resizingRef.current
+      if (!r) return
+      setWidth(r.id, r.startWidth + (ev.clientX - r.startX))
+    }
+    const onUp = () => {
+      resizingRef.current = null
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
+  const tableWidth = useMemo(
+    () => IMPORT_COLUMNS.reduce((sum, col) => sum + widthOf(col.id), 0),
+    [widthOf],
+  )
 
   const hasCategoryFilter = filterCategoryIds.length > 0 || filterUncategorized
 
   const filtered = useMemo(() => {
-    return transactions.filter(tx => {
+    return transactions.filter((tx) => {
       if (searchQuery) {
         const q = searchQuery.toLowerCase()
         if (!tx.description.toLowerCase().includes(q)) return false
       }
       if (hasCategoryFilter) {
-        const catId = tx.selected_category_id !== undefined ? tx.selected_category_id : tx.suggested_category_id
+        const catId =
+          tx.selected_category_id !== undefined ? tx.selected_category_id : tx.suggested_category_id
         if (filterUncategorized && !filterCategoryIds.length) {
           if (catId) return false
         } else if (filterUncategorized) {
@@ -102,11 +201,23 @@ export function ImportReviewTable({
       if (statusFilter === 'excluded' && !tx.excluded) return false
       return true
     })
-  }, [transactions, searchQuery, filterCategoryIds, filterUncategorized, hasCategoryFilter, statusFilter])
+  }, [
+    transactions,
+    searchQuery,
+    filterCategoryIds,
+    filterUncategorized,
+    hasCategoryFilter,
+    statusFilter,
+  ])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
   const safePage = Math.min(currentPage, totalPages)
   const pageItems = filtered.slice((safePage - 1) * pageSize, safePage * pageSize)
+
+  const colStyle = (id: ImportColId) => {
+    const w = widthOf(id)
+    return { width: w, minWidth: w, maxWidth: w }
+  }
 
   return (
     <div>
@@ -115,14 +226,23 @@ export function ImportReviewTable({
         <Input
           placeholder={t('import.searchTransactions')}
           value={searchQuery}
-          onChange={(e) => { onSearchChange(e.target.value); onPageChange(1) }}
+          onChange={(e) => {
+            onSearchChange(e.target.value)
+            onPageChange(1)
+          }}
           className="max-w-xs h-8 text-sm border border-border rounded-md px-3 bg-card focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
         />
         <CategoryFilterDropdown
           categoryIds={filterCategoryIds}
-          onCategoryIdsChange={(ids) => { onCategoryIdsChange(ids); onPageChange(1) }}
+          onCategoryIdsChange={(ids) => {
+            onCategoryIdsChange(ids)
+            onPageChange(1)
+          }}
           filterUncategorized={filterUncategorized}
-          onUncategorizedChange={(v) => { onUncategorizedChange(v); onPageChange(1) }}
+          onUncategorizedChange={(v) => {
+            onUncategorizedChange(v)
+            onPageChange(1)
+          }}
           categories={categories}
           groups={groups}
           label={t('import.filterCategory')}
@@ -130,7 +250,10 @@ export function ImportReviewTable({
         <select
           className="border border-border rounded-md px-3 py-1.5 text-sm bg-card focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
           value={statusFilter}
-          onChange={(e) => { onStatusFilterChange(e.target.value as 'all' | 'included' | 'excluded'); onPageChange(1) }}
+          onChange={(e) => {
+            onStatusFilterChange(e.target.value as 'all' | 'included' | 'excluded')
+            onPageChange(1)
+          }}
         >
           <option value="all">{t('import.allStatus')}</option>
           <option value="included">{t('import.included')}</option>
@@ -138,98 +261,127 @@ export function ImportReviewTable({
         </select>
       </div>
 
-      {/* Table */}
-      <div className="max-h-[480px] overflow-auto">
-        <Table>
-          <TableHeader>
+      {/* Single scrollport for both axes so the horizontal bar stays visible
+          without scrolling to the bottom of a nested overflow-x wrapper. */}
+      <div className="max-h-[min(60vh,560px)] overflow-auto">
+        <table
+          className="caption-bottom text-sm table-fixed"
+          style={{ width: tableWidth, minWidth: tableWidth }}
+        >
+          <TableHeader className="sticky top-0 z-10 bg-card shadow-[inset_0_-1px_0_0_hsl(var(--border))]">
             <TableRow className="hover:bg-transparent bg-transparent border-b border-border">
-              <TableHead className="text-xs font-medium text-muted-foreground py-3 pl-4 w-[40px]">
-                <span className="sr-only">Toggle</span>
-              </TableHead>
-              <TableHead className="text-xs font-medium text-muted-foreground py-3 w-[100px]">
-                {t('transactions.date')}
-              </TableHead>
-              <TableHead className="text-xs font-medium text-muted-foreground py-3">
-                {t('transactions.description')}
-              </TableHead>
-              <TableHead className="text-xs font-medium text-muted-foreground py-3 w-[80px] text-center">
-                {t('transactions.colInstallment')}
-              </TableHead>
-              <TableHead className="text-xs font-medium text-muted-foreground py-3 w-[130px]">
-                {t('transactions.colCardholder')}
-              </TableHead>
-              <TableHead className="text-xs font-medium text-muted-foreground py-3 text-right w-[120px]">
-                {t('transactions.amount')}
-              </TableHead>
-              <TableHead className="text-xs font-medium text-muted-foreground py-3 w-[160px]">
-                {t('import.category')}
-              </TableHead>
-              <TableHead className="text-xs font-medium text-muted-foreground py-3 pr-4 w-[90px]">
-                {t('transactions.status')}
-              </TableHead>
+              {IMPORT_COLUMNS.map((col) => {
+                const align =
+                  col.align === 'right'
+                    ? 'text-right'
+                    : col.align === 'center'
+                      ? 'text-center'
+                      : 'text-left'
+                return (
+                  <TableHead
+                    key={col.id}
+                    style={colStyle(col.id)}
+                    className={`relative text-xs font-medium text-muted-foreground py-3 bg-card ${align} ${
+                      col.id === 'toggle' ? 'pl-4' : ''
+                    } ${col.id === 'status' ? 'pr-4' : ''}`}
+                  >
+                    {col.srOnly ? (
+                      <span className="sr-only">Toggle</span>
+                    ) : (
+                      <span className="truncate block">{t(col.labelKey!)}</span>
+                    )}
+                    <span
+                      onPointerDown={(e) => startResize(e, col.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      aria-hidden="true"
+                      className="absolute right-0 top-0 h-full w-2 -mr-1 cursor-col-resize select-none hover:bg-primary/40 active:bg-primary/60"
+                    />
+                  </TableHead>
+                )
+              })}
             </TableRow>
           </TableHeader>
           <TableBody>
-            {pageItems.map((tx) => {
-              return (
-                <TableRow
-                  key={tx._id}
-                  className={`border-b border-border last:border-0 hover:bg-muted ${tx.excluded ? 'opacity-50' : ''}`}
+            {pageItems.map((tx) => (
+              <TableRow
+                key={tx._id}
+                className={`border-b border-border last:border-0 hover:bg-muted ${tx.excluded ? 'opacity-50' : ''}`}
+              >
+                <TableCell style={colStyle('toggle')} className="py-2.5 pl-4">
+                  <input
+                    type="checkbox"
+                    checked={!tx.excluded}
+                    onChange={() => onToggleExcluded(tx._id)}
+                    className="rounded border-border text-primary focus:ring-primary"
+                  />
+                </TableCell>
+                <TableCell
+                  style={colStyle('date')}
+                  className="py-2.5 text-xs text-muted-foreground whitespace-nowrap overflow-hidden text-ellipsis"
                 >
-                  <TableCell className="py-2.5 pl-4">
-                    <input
-                      type="checkbox"
-                      checked={!tx.excluded}
-                      onChange={() => onToggleExcluded(tx._id)}
-                      className="rounded border-border text-primary focus:ring-primary"
-                    />
-                  </TableCell>
-                  <TableCell className="py-2.5 text-xs text-muted-foreground whitespace-nowrap">
-                    {formatLocalDate(tx.date, dateLocale)}
-                  </TableCell>
-                  <TableCell className={`py-2.5 text-sm ${tx.excluded ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
-                    {tx.description}
-                  </TableCell>
-                  <TableCell className="py-2.5 text-xs text-muted-foreground text-center tabular-nums whitespace-nowrap">
-                    {tx.installment_number != null && tx.total_installments != null
-                      ? `${tx.installment_number}/${tx.total_installments}`
-                      : '—'}
-                  </TableCell>
-                  <TableCell className="py-2.5 text-xs text-muted-foreground max-w-[130px] truncate">
-                    {tx.cardholder || '—'}
-                  </TableCell>
-                  <TableCell className={`py-2.5 text-right text-sm font-bold tabular-nums ${tx.type === 'credit' ? 'text-emerald-600' : 'text-rose-500'}`}>
-                    {tx.type === 'credit' ? '+' : '−'}{formatCurrency(Math.abs(Number(tx.amount)), userCurrency, locale)}
-                  </TableCell>
-                  <TableCell className="py-2.5">
-                    <CategorySelect
-                      value={tx.selected_category_id !== undefined
+                  {formatLocalDate(tx.date, dateLocale)}
+                </TableCell>
+                <TableCell
+                  style={colStyle('description')}
+                  className={`py-2.5 text-sm truncate ${tx.excluded ? 'line-through text-muted-foreground' : 'text-foreground'}`}
+                  title={tx.description}
+                >
+                  {tx.description}
+                </TableCell>
+                <TableCell
+                  style={colStyle('installment')}
+                  className="py-2.5 text-xs text-muted-foreground text-center tabular-nums whitespace-nowrap overflow-hidden text-ellipsis"
+                >
+                  {tx.installment_number != null && tx.total_installments != null
+                    ? `${tx.installment_number}/${tx.total_installments}`
+                    : '—'}
+                </TableCell>
+                <TableCell
+                  style={colStyle('cardholder')}
+                  className="py-2.5 text-xs text-muted-foreground truncate"
+                  title={tx.cardholder || undefined}
+                >
+                  {tx.cardholder || '—'}
+                </TableCell>
+                <TableCell
+                  style={colStyle('amount')}
+                  className={`py-2.5 text-right text-sm font-bold tabular-nums whitespace-nowrap overflow-hidden text-ellipsis ${
+                    tx.type === 'credit' ? 'text-emerald-600' : 'text-rose-500'
+                  }`}
+                >
+                  {tx.type === 'credit' ? '+' : '−'}
+                  {formatCurrency(Math.abs(Number(tx.amount)), userCurrency, locale)}
+                </TableCell>
+                <TableCell style={colStyle('category')} className="py-2.5 overflow-hidden">
+                  <CategorySelect
+                    value={
+                      tx.selected_category_id !== undefined
                         ? (tx.selected_category_id ?? '')
-                        : (tx.suggested_category_id ?? '')}
-                      onChange={(v) => onChangeCategory(tx._id, v || null)}
-                      categories={categories}
-                      groups={groups}
-                      placeholder={t('import.noCategory')}
-                      allowNone
-                      className="w-full border border-border rounded-md px-2 py-1 text-xs bg-card focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
-                    />
-                  </TableCell>
-                  <TableCell className="py-2.5 pr-4">
-                    {tx.excluded ? (
-                      <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded">
-                        {t('import.excluded')}
-                      </span>
-                    ) : (
-                      <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">
-                        {t('import.included')}
-                      </span>
-                    )}
-                  </TableCell>
-                </TableRow>
-              )
-            })}
+                        : (tx.suggested_category_id ?? '')
+                    }
+                    onChange={(v) => onChangeCategory(tx._id, v || null)}
+                    categories={categories}
+                    groups={groups}
+                    placeholder={t('import.noCategory')}
+                    allowNone
+                    className="w-full border border-border rounded-md px-2 py-1 text-xs bg-card focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
+                  />
+                </TableCell>
+                <TableCell style={colStyle('status')} className="py-2.5 pr-4 whitespace-nowrap overflow-hidden">
+                  {tx.excluded ? (
+                    <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded">
+                      {t('import.excluded')}
+                    </span>
+                  ) : (
+                    <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">
+                      {t('import.included')}
+                    </span>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
           </TableBody>
-        </Table>
+        </table>
       </div>
 
       {/* Pagination */}
@@ -260,7 +412,9 @@ export function ImportReviewTable({
           )}
 
           <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">{t('common.rowsPerPage', 'Rows per page')}</span>
+            <span className="text-xs text-muted-foreground">
+              {t('common.rowsPerPage', 'Rows per page')}
+            </span>
             <Select
               value={String(pageSize)}
               onValueChange={(val) => {

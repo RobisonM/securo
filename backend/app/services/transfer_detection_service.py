@@ -230,6 +230,13 @@ async def detect_transfer_pairs(
         pair_id = uuid.uuid4()
         debit.transfer_pair_id = pair_id
         best_match.transfer_pair_id = pair_id
+        # CC statement credits are imported with exclude_from_pnl so they
+        # act as fatura abatements until paired. Once linked to the bank
+        # debit, clear the flag so classification can surface card_payment.
+        if getattr(debit, "exclude_from_pnl", False):
+            debit.exclude_from_pnl = False
+        if getattr(best_match, "exclude_from_pnl", False):
+            best_match.exclude_from_pnl = False
         paired_credit_ids.add(best_match.id)
         pairs_created += 1
 
