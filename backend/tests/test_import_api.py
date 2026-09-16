@@ -312,6 +312,129 @@ async def test_preview_returns_suggested_categories(
     assert unknown["suggested_category_name"] is None
 
 
+async def test_preview_prefills_categories_from_prior_import(
+    client: AsyncClient, auth_headers, test_account: Account, test_categories: list
+):
+    """Re-previewing the same file for the same account restores saved categories."""
+    csv_content = (
+        b"data,descricao,valor\n"
+        b"10/02/2026,SUPERMERCADO EXEMPLO,-98.42\n"
+        b"11/02/2026,POSTO SHELL,-200.00\n"
+    )
+    cat_id = str(test_categories[0].id)
+
+    preview = await client.post(
+        "/api/transactions/import/preview",
+        headers=auth_headers,
+        files={"file": ("extrato.csv", csv_content, "text/csv")},
+        data={"account_id": str(test_account.id)},
+    )
+    assert preview.status_code == 200
+    pdata = preview.json()
+    assert len(pdata["transactions"]) == 2
+    assert pdata["transactions"][0]["suggested_category_id"] is None
+
+    txns = []
+    for i, row in enumerate(pdata["transactions"]):
+        txns.append({
+            "description": row["description"],
+            "amount": row["amount"],
+            "date": row["date"],
+            "type": row["type"],
+            "external_id": row["external_id"],
+            "category_id": cat_id if i == 0 else None,
+        })
+
+    imported = await client.post(
+        "/api/transactions/import",
+        headers=auth_headers,
+        json={
+            "account_id": str(test_account.id),
+            "transactions": txns,
+            "filename": "extrato.csv",
+            "detected_format": "csv",
+            "import_mac": pdata["import_mac"],
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["imported"] == 2
+
+    again = await client.post(
+        "/api/transactions/import/preview",
+        headers=auth_headers,
+        files={"file": ("extrato.csv", csv_content, "text/csv")},
+        data={"account_id": str(test_account.id)},
+    )
+    assert again.status_code == 200
+    rows = again.json()["transactions"]
+    assert rows[0]["description"] == "SUPERMERCADO EXEMPLO"
+    assert rows[0]["suggested_category_id"] == cat_id
+    assert rows[0]["suggested_category_name"] == test_categories[0].name
+    assert rows[1]["suggested_category_id"] is None
+
+
+async def test_preview_prefills_from_prior_merchant_on_new_file(
+    client: AsyncClient, auth_headers, test_account: Account, test_categories: list
+):
+    """A second statement file inherits categories from earlier merchant history."""
+    cat_id = str(test_categories[0].id)
+    first = (
+        b"data,descricao,valor\n"
+        b"10/02/2026,DROGASIL 3034,-54.94\n"
+    )
+    second = (
+        b"data,descricao,valor\n"
+        b"20/03/2026,DROGASIL 3852,-99.69\n"
+        b"21/03/2026,POSTO SHELL,-150.00\n"
+    )
+
+    preview1 = await client.post(
+        "/api/transactions/import/preview",
+        headers=auth_headers,
+        files={"file": ("fatura1.csv", first, "text/csv")},
+        data={"account_id": str(test_account.id)},
+    )
+    assert preview1.status_code == 200
+    p1 = preview1.json()
+    assert len(p1["transactions"]) == 1
+
+    imported = await client.post(
+        "/api/transactions/import",
+        headers=auth_headers,
+        json={
+            "account_id": str(test_account.id),
+            "transactions": [
+                {
+                    "description": p1["transactions"][0]["description"],
+                    "amount": p1["transactions"][0]["amount"],
+                    "date": p1["transactions"][0]["date"],
+                    "type": p1["transactions"][0]["type"],
+                    "external_id": p1["transactions"][0]["external_id"],
+                    "category_id": cat_id,
+                }
+            ],
+            "filename": "fatura1.csv",
+            "detected_format": "csv",
+            "import_mac": p1["import_mac"],
+        },
+    )
+    assert imported.status_code == 201, imported.text
+
+    preview2 = await client.post(
+        "/api/transactions/import/preview",
+        headers=auth_headers,
+        files={"file": ("fatura2.csv", second, "text/csv")},
+        data={"account_id": str(test_account.id)},
+    )
+    assert preview2.status_code == 200
+    rows = preview2.json()["transactions"]
+    drogasil = next(r for r in rows if "DROGASIL" in r["description"])
+    posto = next(r for r in rows if "POSTO" in r["description"])
+    assert drogasil["suggested_category_id"] == cat_id
+    assert drogasil["suggested_category_name"] == test_categories[0].name
+    assert posto["suggested_category_id"] is None
+
+
 async def test_import_with_excluded_transactions(
     client: AsyncClient, auth_headers, test_account: Account
 ):

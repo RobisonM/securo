@@ -112,3 +112,77 @@ export function buildSimilarRuleDraft(description: string): SimilarRuleDraft {
     isStable: false,
   }
 }
+
+/** Collapse bank memo noise so identical merchants compare equal. */
+export function normalizeImportDescription(description: string): string {
+  return stripAccents(description ?? '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * Whether two import-review rows should share a category the user just picked.
+ *
+ * Prefer exact normalized equality (Sicredi repeats the same truncated memo).
+ * Fall back to the same stable merchant token so "DROGASIL 3034" and
+ * "DROGASIL 3852" travel together without matching unrelated PIX noise.
+ */
+export function importDescriptionsMatch(a: string, b: string): boolean {
+  const na = normalizeImportDescription(a)
+  const nb = normalizeImportDescription(b)
+  if (!na || !nb) return false
+  if (na === nb) return true
+
+  const termA = extractStableDescriptionTerm(a)
+  const termB = extractStableDescriptionTerm(b)
+  return Boolean(termA && termB && termA === termB)
+}
+
+export type ImportCategoryPropagateResult<T extends { _id: string; description: string; selected_category_id?: string | null }> = {
+  next: T[]
+  /** Rows (excluding the source) that received the new category. */
+  propagated: number
+}
+
+/**
+ * Apply a category to the edited row and to siblings in the same import list
+ * whose description matches. Rows the user already categorized differently
+ * are left alone.
+ */
+export function propagateImportCategory<
+  T extends { _id: string; description: string; selected_category_id?: string | null },
+>(
+  rows: T[],
+  sourceId: string,
+  categoryId: string | null,
+): ImportCategoryPropagateResult<T> {
+  const source = rows.find((r) => r._id === sourceId)
+  if (!source) {
+    return { next: rows, propagated: 0 }
+  }
+
+  let propagated = 0
+  const next = rows.map((row) => {
+    if (row._id === sourceId) {
+      return { ...row, selected_category_id: categoryId }
+    }
+    if (!importDescriptionsMatch(source.description, row.description)) {
+      return row
+    }
+    // Keep an intentional different pick; only fill untouched (or same) rows.
+    if (
+      row.selected_category_id !== undefined &&
+      row.selected_category_id !== categoryId
+    ) {
+      return row
+    }
+    if (row.selected_category_id === categoryId) {
+      return row
+    }
+    propagated += 1
+    return { ...row, selected_category_id: categoryId }
+  })
+
+  return { next, propagated }
+}

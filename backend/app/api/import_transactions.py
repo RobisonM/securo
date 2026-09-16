@@ -174,7 +174,7 @@ async def preview_import(
     )
 
     transactions = await import_service.enrich_with_category_suggestions(
-        session, ctx.workspace.id, transactions,
+        session, ctx.workspace.id, transactions, account_id=account_id,
     )
 
     # Expose CSV headers so the UI can offer accurate column-mapping dropdowns.

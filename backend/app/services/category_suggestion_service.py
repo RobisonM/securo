@@ -83,10 +83,13 @@ class _HistoryRow:
 def _consensus(
     category_counts: Counter[uuid.UUID],
     names: dict[uuid.UUID, str],
+    *,
+    min_samples: int = MIN_SAMPLES,
+    dominant_ratio: float = DOMINANT_RATIO,
 ) -> tuple[uuid.UUID, str, int, int, float] | None:
     """Return (category_id, name, matched, total, confidence) or None."""
     total = sum(category_counts.values())
-    if total < MIN_SAMPLES:
+    if total < min_samples:
         return None
     top = category_counts.most_common(2)
     dominant_id, dominant_count = top[0]
@@ -94,7 +97,7 @@ def _consensus(
     if len(top) >= 2 and top[0][1] == top[1][1]:
         return None
     ratio = dominant_count / total
-    if ratio < DOMINANT_RATIO:
+    if ratio < dominant_ratio:
         return None
     name = names.get(dominant_id)
     if not name:
@@ -240,6 +243,8 @@ def _suggest_from_counts(
     *,
     code: ReasonCode,
     identity_label: str | None = None,
+    min_samples: int = MIN_SAMPLES,
+    dominant_ratio: float = DOMINANT_RATIO,
 ) -> CategorySuggestion | None:
     recent = _recent_slice(rows)
     counts: Counter[uuid.UUID] = Counter()
@@ -247,7 +252,9 @@ def _suggest_from_counts(
     for row in recent:
         counts[row.category_id] += 1
         names[row.category_id] = row.category_name
-    result = _consensus(counts, names)
+    result = _consensus(
+        counts, names, min_samples=min_samples, dominant_ratio=dominant_ratio
+    )
     if result is None:
         return None
     cat_id, name, matched, total, conf = result
@@ -273,6 +280,8 @@ def _suggest_from_payee(
 def _suggest_from_merchant(
     merchant_key: str,
     history: Iterable[_HistoryRow],
+    *,
+    min_samples: int = MIN_SAMPLES,
 ) -> CategorySuggestion | None:
     rows = [
         row
@@ -283,12 +292,15 @@ def _suggest_from_merchant(
         rows,
         code="same_merchant",
         identity_label=merchant_key,
+        min_samples=min_samples,
     )
 
 
 def _suggest_from_signature(
     signature: str,
     history: Iterable[_HistoryRow],
+    *,
+    min_samples: int = MIN_SAMPLES,
 ) -> CategorySuggestion | None:
     rows = [
         row
@@ -296,7 +308,86 @@ def _suggest_from_signature(
         if description_matches_signature(row.description, signature)
     ]
     # Prefer the explicit 3B code; keep similar_description unused for new paths.
-    return _suggest_from_counts(rows, code="same_description_signature")
+    return _suggest_from_counts(
+        rows, code="same_description_signature", min_samples=min_samples
+    )
+
+
+def _normalize_memo(description: str) -> str:
+    return " ".join((description or "").casefold().split())
+
+
+def _suggest_exact_memo(
+    description: str,
+    history: Iterable[_HistoryRow],
+) -> CategorySuggestion | None:
+    """One prior identical memo is enough to prefill a new import row."""
+    needle = _normalize_memo(description)
+    if not needle:
+        return None
+    rows = [row for row in history if _normalize_memo(row.description) == needle]
+    return _suggest_from_counts(
+        rows,
+        code="same_description_signature",
+        identity_label=needle[:64] or None,
+        min_samples=1,
+    )
+
+
+def _identity_for_description(description: str) -> tuple[str | None, str | None]:
+    merchant = derive_merchant_key(description)
+    signature = extract_stable_description_term(description)
+    if merchant and signature and (
+        merchant == signature or signature in merchant.split()
+    ):
+        signature = None
+    return merchant, signature
+
+
+async def suggest_categories_for_import_descriptions(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    descriptions: list[str],
+) -> list[CategorySuggestion | None]:
+    """Prefill import-review categories from workspace history.
+
+    Unlike the pending-inbox path (MIN_SAMPLES=2), import accepts a single
+    prior categorization for the same memo/merchant so a second statement
+    file inherits what the user already confirmed.
+    """
+    if not descriptions:
+        return []
+
+    needles: set[str] = set()
+    identities: list[tuple[str | None, str | None]] = []
+    for desc in descriptions:
+        merchant, signature = _identity_for_description(desc)
+        identities.append((merchant, signature))
+        if merchant:
+            needles.update(merchant_key_search_needles(merchant))
+        if signature:
+            needles.add(signature)
+        # Exact-memo lookup still benefits from a coarse ILIKE needle.
+        token = extract_stable_description_term(desc)
+        if token:
+            needles.add(token)
+        compact = _normalize_memo(desc)
+        if compact and len(compact) >= 4:
+            needles.add(compact[:48])
+
+    history = await _fetch_description_history(
+        session, workspace_id, needles, exclude_ids=set()
+    )
+
+    out: list[CategorySuggestion | None] = []
+    for desc, (merchant, signature) in zip(descriptions, identities):
+        suggestion = _suggest_exact_memo(desc, history)
+        if suggestion is None and merchant:
+            suggestion = _suggest_from_merchant(merchant, history, min_samples=1)
+        if suggestion is None and signature:
+            suggestion = _suggest_from_signature(signature, history, min_samples=1)
+        out.append(suggestion)
+    return out
 
 
 def _identity_for_tx(tx: Transaction) -> tuple[str | None, str | None]:

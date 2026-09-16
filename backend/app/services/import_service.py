@@ -806,6 +806,7 @@ async def enrich_with_category_suggestions(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     transactions: list[TransactionImport],
+    account_id: uuid.UUID | None = None,
 ) -> list[TransactionImport]:
     result = await session.execute(
         select(Rule)
@@ -821,49 +822,157 @@ async def enrich_with_category_suggestions(
     hidden_categories = await get_hidden_category_ids(session, workspace_id)
     category_name_map = {str(c.id): c.name for c in categories}
     category_name_to_id = {
-        c.name.strip().lower(): c.id 
-        for c in categories 
+        c.name.strip().lower(): c.id
+        for c in categories
         if c.id not in hidden_categories
     }
 
-    if not rules and not category_name_to_id:
-        return transactions
+    if rules or category_name_to_id:
+        for txn in transactions:
+            proxy: Transaction = Transaction(
+                description=txn.description,
+                amount=txn.amount,
+                date=txn.date,
+                type=txn.type,
+                account_id=None,
+                payee_id=None,
+                notes=None,
+                category_id=None,
+            )
+            category_set = False
 
-    for txn in transactions:
-        proxy: Transaction = Transaction(
-            description=txn.description,
-            amount=txn.amount,
-            date=txn.date,
-            type=txn.type,
-            account_id=None,
-            payee_id=None,
-            notes=None,
-            category_id=None,
+            for rule in rules:
+                conditions = rule.conditions or []
+                actions = rule.actions or []
+                if evaluate_conditions(rule.conditions_op, conditions, proxy):
+                    category_set = apply_rule_actions(
+                        actions,
+                        proxy,
+                        category_set,
+                        hidden_category_ids=hidden_categories,
+                    )
+
+            # If rules did not set a category, apply the CSV category if found
+            if not category_set and txn.category_name:
+                csv_cat_id = category_name_to_id.get(txn.category_name.strip().lower())
+                if csv_cat_id:
+                    proxy.category_id = csv_cat_id
+                    category_set = True
+            if proxy.category_id:
+                txn.suggested_category_id = proxy.category_id
+                txn.suggested_category_name = category_name_map.get(str(proxy.category_id))
+
+    if account_id is not None:
+        await _apply_prior_import_categories(
+            session, account_id, transactions, category_name_map
         )
-        category_set = False
-        
-        for rule in rules:
-            conditions = rule.conditions or []
-            actions = rule.actions or []
-            if evaluate_conditions(rule.conditions_op, conditions, proxy):
-                category_set = apply_rule_actions(
-                    actions,
-                    proxy,
-                    category_set,
-                    hidden_category_ids=hidden_categories,
-                )
-        
-        # If rules did not set a category, apply the CSV category if found
-        if not category_set and txn.category_name:
-            csv_cat_id = category_name_to_id.get(txn.category_name.strip().lower())
-            if csv_cat_id:
-                proxy.category_id = csv_cat_id
-                category_set = True
-        if proxy.category_id:
-            txn.suggested_category_id = proxy.category_id
-            txn.suggested_category_name = category_name_map.get(str(proxy.category_id))
+
+    await _apply_historical_description_categories(
+        session, workspace_id, transactions
+    )
 
     return transactions
+
+
+async def _apply_historical_description_categories(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    transactions: list[TransactionImport],
+) -> None:
+    """Fill empty suggestions from earlier categorizations of the same merchant.
+
+    Covers a *new* statement file after the user already categorized DROGASIL /
+    NETFLIX / etc. on a previous import. Does not override rules, CSV columns,
+    or same-file prior-import matches already set on the row.
+    """
+    pending_idxs = [
+        i for i, t in enumerate(transactions) if t.suggested_category_id is None
+    ]
+    if not pending_idxs:
+        return
+
+    from app.services.category_suggestion_service import (
+        suggest_categories_for_import_descriptions,
+    )
+
+    suggestions = await suggest_categories_for_import_descriptions(
+        session,
+        workspace_id,
+        [transactions[i].description for i in pending_idxs],
+    )
+    for idx, suggestion in zip(pending_idxs, suggestions):
+        if suggestion is None:
+            continue
+        transactions[idx].suggested_category_id = suggestion.category_id
+        transactions[idx].suggested_category_name = suggestion.category_name
+
+
+async def _apply_prior_import_categories(
+    session: AsyncSession,
+    account_id: uuid.UUID,
+    transactions: list[TransactionImport],
+    category_name_map: dict[str, str],
+) -> None:
+    """Prefill suggestions from categories already saved on matching rows.
+
+    Same-file reimport keeps stable ``IMP-{fingerprint}:{row}`` external ids, so
+    the review UI can show what the user categorized last time instead of blank
+    dropdowns. Soft date/amount/type/description match covers OFX/QIF rows and
+    older imports before synthetic ids.
+    """
+    if not transactions:
+        return
+
+    dates = {t.date for t in transactions}
+    if not dates:
+        return
+
+    result = await session.execute(
+        select(Transaction).where(
+            Transaction.account_id == account_id,
+            Transaction.category_id.isnot(None),
+            Transaction.date.in_(dates),
+        )
+    )
+    existing = list(result.scalars().all())
+    if not existing:
+        return
+
+    by_external: dict[tuple[str, object], Transaction] = {}
+    by_soft: dict[tuple, list[Transaction]] = defaultdict(list)
+    for et in existing:
+        if et.external_id:
+            by_external[(et.external_id, et.date)] = et
+        soft_key = (
+            et.date,
+            et.amount,
+            et.type,
+            (et.original_description or et.description or ""),
+        )
+        by_soft[soft_key].append(et)
+        # Also index by current description when it differs from original.
+        if et.description and et.description != et.original_description:
+            by_soft[(et.date, et.amount, et.type, et.description)].append(et)
+
+    soft_occurrence: dict[tuple, int] = defaultdict(int)
+    for txn in transactions:
+        matched: Transaction | None = None
+        if txn.external_id:
+            matched = by_external.get((txn.external_id, txn.date))
+        if matched is None:
+            soft_key = (txn.date, txn.amount, txn.type, txn.description)
+            soft_occurrence[soft_key] += 1
+            candidates = by_soft.get(soft_key) or []
+            idx = soft_occurrence[soft_key] - 1
+            if idx < len(candidates):
+                matched = candidates[idx]
+
+        if matched is None or matched.category_id is None:
+            continue
+        # Prior categorized row wins over rule/CSV suggestions so reimport
+        # review mirrors what was already confirmed for this file/account.
+        txn.suggested_category_id = matched.category_id
+        txn.suggested_category_name = category_name_map.get(str(matched.category_id))
 
 
 async def import_transactions(

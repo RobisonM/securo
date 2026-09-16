@@ -10,7 +10,7 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import type { ImportPreviewTransaction, ImportPreviewResponse, ImportReviewTransaction } from '@/types'
-import { Upload, FileText, X, CheckCircle2, AlertCircle, Settings2, Download } from 'lucide-react'
+import { Upload, FileText, X, CheckCircle2, AlertCircle, Settings2, Download, ChevronDown, ChevronRight } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { PageHeader } from '@/components/page-header'
 import { AssetImportPanel } from '@/components/asset-import-panel'
@@ -19,6 +19,7 @@ import { ImportReviewTable } from '@/components/import-review-table'
 import { ImportHistory } from '@/components/import-history'
 import { useAuth } from '@/contexts/auth-context'
 import { useWorkspace } from '@/contexts/workspace-context'
+import { propagateImportCategory } from '@/lib/similar-description'
 
 const TYPE_LABELS: Record<string, string> = {
   checking: 'accounts.typeChecking',
@@ -84,6 +85,9 @@ function TransactionImportPanel() {
   const [csvColumnMapping, setCsvColumnMapping] = useState<Record<string, string>>({})
   const [csvHeaderRow, setCsvHeaderRow] = useState('')
   const [csvDelimiter, setCsvDelimiter] = useState('')
+  // When the account has a saved import_profile, keep CSV options/mapping collapsed
+  // so the review stays focused; user can expand to override.
+  const [csvOptionsExpanded, setCsvOptionsExpanded] = useState(true)
 
   const { data: accountsList } = useQuery({
     queryKey: ['accounts'],
@@ -103,7 +107,10 @@ function TransactionImportPanel() {
   function applyAccountProfileToState(accountId: string) {
     const account = accountsList?.find((a) => a.id === accountId)
     const profile = account?.import_profile
-    if (!profile) return null
+    if (!profile) {
+      setCsvOptionsExpanded(true)
+      return null
+    }
     const mapping = profile.column_mapping ?? {}
     setCsvDateFormat(profile.date_format ?? '')
     setCsvFlipAmount(!!profile.flip_amount)
@@ -113,6 +120,7 @@ function TransactionImportPanel() {
     if (profile.amount_semantics === 'signed' || profile.amount_semantics === 'expenses_positive') {
       setCcAmountSemantics(profile.amount_semantics)
     }
+    setCsvOptionsExpanded(false)
     return profile
   }
 
@@ -278,6 +286,7 @@ function TransactionImportPanel() {
     setCsvHeaders([])
     setCsvHeaderRow('')
     setCsvDelimiter('')
+    setCsvOptionsExpanded(true)
   }
 
   function processFile(file: File) {
@@ -327,9 +336,14 @@ function TransactionImportPanel() {
 
   const handleAccountChange = (accountId: string) => {
     setSelectedAccount(accountId)
-    if (!currentFile) return
     if (!accountId) {
-      rePreview({ account_id: '' })
+      setCsvOptionsExpanded(true)
+      if (currentFile) rePreview({ account_id: '' })
+      return
+    }
+    if (!currentFile) {
+      const account = accountsList?.find((a) => a.id === accountId)
+      setCsvOptionsExpanded(!account?.import_profile)
       return
     }
     const profile = applyAccountProfileToState(accountId)
@@ -377,10 +391,17 @@ function TransactionImportPanel() {
   }, [])
 
   const handleChangeCategory = useCallback((id: string, categoryId: string | null) => {
-    setReviewTransactions(prev => prev.map(t =>
-      t._id === id ? { ...t, selected_category_id: categoryId } : t
-    ))
-  }, [])
+    setReviewTransactions((prev) => {
+      const { next, propagated } = propagateImportCategory(prev, id, categoryId)
+      if (propagated > 0) {
+        // Defer toast so we don't fire during render of the state updater.
+        queueMicrotask(() => {
+          toast.success(t('import.categoryPropagated', { count: propagated }))
+        })
+      }
+      return next
+    })
+  }, [t])
 
   const isCsvFile = fileName?.toLowerCase().endsWith('.csv') ?? false
   // QIF dates are ambiguous for days 1-12 (DD/MM vs MM/DD), so the file
@@ -392,6 +413,11 @@ function TransactionImportPanel() {
 
   const includedCount = reviewTransactions.filter(t => !t.excluded).length
   const selectedAccountObj = accountsList?.find((a) => a.id === selectedAccount)
+  const accountHasImportProfile = Boolean(selectedAccountObj?.import_profile)
+  const showCsvOptionsBody =
+    csvOptionsExpanded ||
+    Boolean(previewData?.parse_error) ||
+    !accountHasImportProfile
   const includedAllCredits =
     includedCount > 0 &&
     reviewTransactions.filter((t) => !t.excluded).every((t) => t.type === 'credit')
@@ -554,38 +580,62 @@ function TransactionImportPanel() {
           {/* CSV/QIF Options */}
           {(isCsvFile || isQifFile) && previewData && (
             <div className="px-5 py-4 border-b border-border bg-muted/30">
-              <div className="flex items-center gap-2 mb-3">
-                <Settings2 size={14} className="text-muted-foreground" />
-                <p className="text-xs font-medium text-muted-foreground">
-                  {isCsvFile ? t('import.csvOptions') : t('import.importOptions')}
-                </p>
-              </div>
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 text-left group"
+                onClick={() => setCsvOptionsExpanded((v) => !v)}
+                aria-expanded={showCsvOptionsBody}
+              >
+                {showCsvOptionsBody ? (
+                  <ChevronDown size={14} className="text-muted-foreground shrink-0" />
+                ) : (
+                  <ChevronRight size={14} className="text-muted-foreground shrink-0" />
+                )}
+                <Settings2 size={14} className="text-muted-foreground shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-medium text-muted-foreground group-hover:text-foreground transition-colors">
+                    {isCsvFile ? t('import.csvOptions') : t('import.importOptions')}
+                    {isCsvFile && accountHasImportProfile ? ` · ${t('import.columnMapping')}` : ''}
+                  </p>
+                  {accountHasImportProfile && !showCsvOptionsBody && (
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {t('import.csvOptionsCollapsedHint')}
+                    </p>
+                  )}
+                </div>
+              </button>
 
-              {previewData.parse_error && (
-                <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-3 py-2 rounded-lg mb-3">
-                  <AlertCircle size={14} className="shrink-0 mt-0.5" />
-                  <span>{t('import.mappingNeeded')}</span>
+              {(previewData.parse_error || (previewData.failed_rows && previewData.failed_rows.length > 0)) && (
+                <div className="mt-3 space-y-2">
+                  {previewData.parse_error && (
+                    <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-3 py-2 rounded-lg">
+                      <AlertCircle size={14} className="shrink-0 mt-0.5" />
+                      <span>{t('import.mappingNeeded')}</span>
+                    </div>
+                  )}
+                  {previewData.failed_rows && previewData.failed_rows.length > 0 && (
+                    <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-3 py-2 rounded-lg">
+                      <AlertCircle size={14} className="shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <span>
+                          {t('import.failedRowsWarning', { count: previewData.failed_rows.length })}
+                        </span>
+                        <button
+                          type="button"
+                          className="ml-2 font-semibold underline hover:text-amber-800 focus:outline-none"
+                          onClick={() => setIsFailedRowsOpen(true)}
+                        >
+                          {t('import.viewDetails')}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
-              {previewData.failed_rows && previewData.failed_rows.length > 0 && (
-                <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-3 py-2 rounded-lg mb-3">
-                  <AlertCircle size={14} className="shrink-0 mt-0.5" />
-                  <div className="flex-1">
-                    <span>
-                      {t('import.failedRowsWarning', { count: previewData.failed_rows.length })}
-                    </span>
-                    <button
-                      type="button"
-                      className="ml-2 font-semibold underline hover:text-amber-800 focus:outline-none"
-                      onClick={() => setIsFailedRowsOpen(true)}
-                    >
-                      {t('import.viewDetails')}
-                    </button>
-                  </div>
-                </div>
-              )}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {showCsvOptionsBody && (
+                <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-3">
                 <div>
                   <Label className="text-xs text-muted-foreground mb-1 block">{t('import.dateFormat')}</Label>
                   <select
@@ -687,6 +737,8 @@ function TransactionImportPanel() {
                       ))}
                   </div>
                 </div>
+              )}
+                </>
               )}
             </div>
           )}
